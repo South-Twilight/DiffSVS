@@ -1,0 +1,87 @@
+=== 歌声合成数据集深度检测报告 ===
+
+
+
+🟡 【第二部分：潜在异常警告 (WARNINGS)】
+说明：这些数据格式合法，能跑通训练，但存在逻辑瑕疵，可能会严重影响模型的发音质量（吐字不清/电音/爆音等）。
+
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0000
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0000.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0001
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0001.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0002
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0002.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0003
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0003.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0004
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0004.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0005
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0005.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0006
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0006.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0007
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0007.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0008
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0008.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Control_Group#0009
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Control_Group/0009.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0000
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0000.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0001
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0001.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0002
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0002.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0003
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0003.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0004
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0004.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0005
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0005.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0006
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0006.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0007
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0007.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0008
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0008.wav
+--------------------------------------------------
+📂 来源文件: /data7/tyx/DiffSVS/data/gtsinger/gtsinger.json
+🔖 数据项名: Chinese#ZH-Alto-1#Vibrato#好久不见#Vibrato_Group#0009
+   ⚠️ 音频文件在当前路径下找不到: /data7/tyx/dataset/GTSinger/Chinese/ZH-Alto-1/Vibrato/好久不见/Vibrato_Group/0009.wav
+--------------------------------------------------
