@@ -99,7 +99,7 @@ def split_dataset(
 if __name__ == "__main__":
     # --- 1. 配置路径 ---
     INPUT_TSV = "./data/postprocess/data_test.tsv"  # 你刚才最后一步生成的纯净文件
-    OUTPUT_DIR = "./data/final"        # 切分后的三个文件存放位置
+    OUTPUT_DIR = "./data/final_test"        # 切分后的三个文件存放位置
     
     # --- 2. 配置 Opencpop/Acesinger 的官方测试集 ID 列表 ---
     # 把你需要分到测试集的 ID 填在这里（注意：只需要填数字部分即可，脚本会自动匹配）

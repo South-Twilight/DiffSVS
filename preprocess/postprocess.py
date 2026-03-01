@@ -12,8 +12,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - 
 logger = logging.getLogger(__name__)
 
 # 配置参数
-INPUT_FILE = './data/preprocess/data_test.tsv'
-OUTPUT_FILE = './data/postprocess/data_test.tsv'
+INPUT_FILE = './data/preprocess/data.tsv'
+OUTPUT_FILE = './data/postprocess/data.tsv'
 
 # 列定义
 FILL_NO_COLS = ['emotion', 'range', 'pace', 'singing_method']

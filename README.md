@@ -5,11 +5,9 @@
 
 data directory: `./data/final`
 
-## Train
-
-### 1. Duration Predction Training
+## Train DiffSVS
 
 ```python
-python main.py --base configs/duration.yaml -t --gpus 0
+python main.py --base configs/diff_cfm.yaml -t --gpus 0,1
 
 ```

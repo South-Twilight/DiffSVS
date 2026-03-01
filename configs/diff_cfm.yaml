@@ -1,0 +1,104 @@
+model:
+  base_learning_rate: 1.0e-04  # 端到端联合训练的最佳初始学习率
+  target: ldm.models.diffsvs_system.DiffSVS_System  # 🌟 指向我们刚写的“统筹经理”外壳
+  params:
+    # ===================================================
+    # 1. CFM (Flow Matching) 核心参数
+    # ===================================================
+    linear_start: 0.00085            # not used in CFM
+    linear_end: 0.012                # not used in CFM
+    timesteps: 1000
+    first_stage_key: audio           # DataLoader 里 Latent 张量的 key
+    cond_stage_key: custom           # 我们在 apply_model 里自己解包条件字典
+    mel_dim: 128                     # 🌟 VAE Latent 的通道数 (Stable Audio 通常是 64 或 128)
+    channels: 0
+    monitor: val/total_loss          # 监控 p_losses 返回的总 Loss
+    scale_by_std: true
+    use_ema: false                   # 训练初期关闭 EMA，后期若追求极致生成质量可开启
+    
+    # ===================================================
+    # 2. 前台 (Frontend)：特征提取与时长预测
+    # ===================================================
+    frontend_config:
+      target: utils.commons.duration.FrontendWrapper 
+      params:
+        phn_vocab: 476               # 音素表大小 (包含 Padding ID)
+        pitch_vocab: 129             # 音高表大小 (0-128)
+        hidden_channels: 768         # 🌟 必须和 backbone 的 hidden_size 保持一致
+        dur_predictor_layers: 2
+        predictor_dropout: 0.5
+        
+    # ===================================================
+    # 3. 大厨 (Backbone)：MMDiT 双流纯 Latent 引擎
+    # ===================================================
+    unet_config:
+      target: ldm.models.diffsvs_model.DiffSVS_MMAudio_Backbone 
+      params:
+        in_channels: 128             # 🌟 必须与上面的 mel_dim / VAE z_channels 一致
+        hidden_size: 768             # Transformer 隐藏层维度
+        num_heads: 12                # 注意力头数
+        N1: 10                       # MMDiT 多模态双流 Block 层数
+        N2: 14                       # DiT 单模态纯音频 Block 层数
+        num_speakers: 100            # 你的数据集中的已知歌手总数
+        
+    # ===================================================
+    # 4. 冻结的第一阶段 (Stable Audio 2 VAE)
+    # ===================================================
+    first_stage_config:
+          target: modules.vae.DiffRhythmVAE # 保持你的类名
+          params:
+            repo_id: "ASLP-lab/DiffRhythm-vae"
+            device: "cuda"
+
+# ===================================================
+# Lightning 训练器与回调配置
+# ===================================================
+lightning:
+  callbacks:
+    image_logger:
+      target: main.AudioLogger       # 训练过程中自动生成试听音频
+      params:
+        sample_rate: 44100           # 🌟 对齐 VAE 的原始采样率
+        for_specs: false             # 纯 Latent 引擎，不再需要画 Mel 频谱图
+        increase_log_steps: false
+        batch_frequency: 5000        # 每 5000 步生成一次试听
+        max_images: 4                # 每次采样 4 首歌曲片段
+        # ⚠️ 彻底删除了 HiFi-GAN vocoder_cfg，现在 AudioLogger 将直接调用 VAE 的 decode 方法
+            
+  trainer:
+    benchmark: True
+    gradient_clip_val: 1.0           # 极重要！防止 Transformer 早期梯度爆炸
+    replace_sampler_ddp: false       # 🌟 必须设为 false！因为我们要用自己写的动态 Sampler
+    
+  modelcheckpoint:
+    params:
+      monitor: val/total_loss        # 监控联合 Loss
+      mode: min
+      save_top_k: 5
+      every_n_epochs: 5
+
+# ===================================================
+# DataLoader 数据配置
+# ===================================================
+data:
+  target: main.LatentDataModuleFromConfig
+  params:
+    # 🚀 A6000 48GB 显存专属动态 Batch 配置
+    max_tokens: 35000                # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
+    max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
+    num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
+    
+    data_dir: "data/final_test"           # 你的数据集路径
+    latent_channels: 128
+    latent_crop_len: 500             # 训练时随机裁剪的 Latent 最大长度
+    drop_rate: 0.1                   # CFG 无条件引导的随机 Drop 概率
+    
+    train:
+      target: ldm.dataset.diffsvs_dataset.DiffSVSTrainDataset 
+      params:
+        dataset_cfg:
+          # 其他会在内部解包的配置
+    validation:
+      target: ldm.dataset.diffsvs_dataset.DiffSVSValidationDataset
+      params:
+        dataset_cfg:

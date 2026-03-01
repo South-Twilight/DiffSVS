@@ -1,14 +1,14 @@
 model:
-  base_learning_rate: 1.0e-04  # 因为去掉了厚重的VAE，纯回归任务学习率可以从 4.5e-6 提高到 1e-4
-  target: ldm.models.duration.DurPredModel  # ⚠️ 确保改成你实际存放我们重写的那个 Duration 类的路径
+  base_learning_rate: 4.5e-06
+  target: ldm.models.duration.DurPredModel
   params:
-    monitor: val/dur_loss      # 监控指标
+    monitor: val/dur_loss    # <--- main.py 会自动读取这个指标来配置 Checkpoint
     ddconfig:
-      # 保留所有与 Transformer (音素编码) 和 Duration 相关的参数
       hidden_size: 256
       dur_predictor_kernel: 3
       dur_predictor_layers: 2
       predictor_dropout: 0.5
+      dropout: 0.0
       enc_layers: 4
       enc_ffn_kernel_size: 9
       enc_prenet: true
@@ -16,36 +16,27 @@ model:
       num_heads: 2
 
 lightning:
-  callbacks:
-    # 替换原来的 AudioLogger 为模型权重自动保存 (ModelCheckpoint)
-    model_checkpoint:
-      target: pytorch_lightning.callbacks.ModelCheckpoint
-      params:
-        monitor: val/dur_loss   # 监视验证集的时长误差
-        mode: min               # 误差越小越好
-        save_top_k: 3           # 自动保留表现最好的 3 个 epoch 的权重
-        filename: "dur-model-{epoch:02d}-{val_dur_loss:.4f}" # 保存的文件名格式
   trainer:
     sync_batchnorm: false
     strategy: ddp               # 多卡分布式训练策略
-    # max_epochs: 200           # 你可以在这里指定最大训练轮数
 
 data:
-  # ⚠️ 注意这里：必须是 DataModule，而不是你的网络模型
-  target: main.SpectrogramDataModuleFromConfig 
+  target: main.LatentDataModuleFromConfig  # 使用你最新重构的类名
   params:
-    batch_size: 64              # 单卡 batch_size (纯文本训练不占显存，可调大)
+    batch_size: 64
     num_workers: 4
-    spec_dir_path: ./data/final # 直接指向包含 tsv 的文件夹
+    data_dir: ./data/final      # 新的精简目录参数
+    latent_channels: 128
+    latent_crop_len: 500
     train:
-      target: ldm.data.duration_dataset.DurTrainDataset
+      target: ldm.dataset.joinaudiodataset_dur.DurTrainDataset
       params:
-        dur_dataset_cfg:
+        dataset_cfg:
           max_ph_len: 150
-          latent_downsample_factor: 1 # 根据你预训练 VAE 的真实降采样率填写
+          latent_downsample_factor: 1
     validation:
-      target: ldm.data.duration_dataset.DurValidationDataset
+      target: ldm.dataset.joinaudiodataset_dur.DurValidationDataset
       params:
-        dur_dataset_cfg:
+        dataset_cfg:
           max_ph_len: 150
           latent_downsample_factor: 1

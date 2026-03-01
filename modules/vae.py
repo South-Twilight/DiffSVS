@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torchaudio
 import logging
 import os
@@ -34,10 +35,8 @@ class PadCrop(torch.nn.Module):
 def set_audio_channels(audio, target_channels):
     """强制转换音频声道数"""
     if target_channels == 1:
-        # 转为单声道
         audio = audio.mean(1, keepdim=True)
     elif target_channels == 2:
-        # 转为双声道
         if audio.shape[1] == 1:
             audio = audio.repeat(1, 2, 1)
         elif audio.shape[1] > 2:
@@ -45,11 +44,13 @@ def set_audio_channels(audio, target_channels):
     return audio
 
 # ==========================================
-# 核心 VAE 封装类
+# 核心 VAE 封装类 (已完美适配 YAML Config)
 # ==========================================
-class DiffRhythmVAE:
+class DiffRhythmVAE(nn.Module): # 🌟 关键修改 1：继承 nn.Module 以防外层框架报错
 
-    def __init__(self, device="cuda", repo_id="ASLP-lab/DiffRhythm-vae"):
+    # 🌟 关键修改 2：增加 ckpt_path 参数，并用 **kwargs 吸收 YAML 中可能多余的参数
+    def __init__(self, ckpt_path=None, device="cuda", repo_id="ASLP-lab/DiffRhythm-vae", **kwargs):
+        super().__init__() # 必须初始化父类
         self.device = device
         self.sampling_rate = 44100
         self.downsampling_ratio = 2048
@@ -58,22 +59,26 @@ class DiffRhythmVAE:
         self.target_channels = 1   # 你期望最终拿到的单声道结果
         
         try:
-            logger.info(f"正在从本地缓存加载 VAE 模型: {repo_id}")
-            vae_ckpt_path = hf_hub_download(
-                repo_id=repo_id,
-                filename="vae_model.pt",
-                local_files_only=True 
-            )
-            self.model = torch.jit.load(vae_ckpt_path, map_location="cpu").to(self.device).eval()
-            logger.info("VAE 模型加载成功。")
+            # 🌟 关键修改 3：优先使用 YAML 传入的本地路径，没有才去下 HF
+            if ckpt_path and os.path.exists(ckpt_path):
+                logger.info(f"正在从配置路径加载 VAE 模型: {ckpt_path}")
+                load_path = ckpt_path
+            else:
+                logger.info(f"未找到/未指定有效的 ckpt_path，尝试从 HuggingFace 本地缓存加载: {repo_id}")
+                load_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename="vae_model.pt",
+                    local_files_only=True 
+                )
+            
+            # 使用 torch.jit.load 加载 .pt 模型
+            self.model = torch.jit.load(load_path, map_location="cpu").to(self.device).eval()
+            logger.info("✅ VAE 模型加载成功。")
         except Exception as e:
-            logger.error(f"加载模型失败: {e}")
+            logger.error(f"❌ 加载模型失败: {e}")
             raise
 
     def preprocess_audio(self, audio, in_sr, target_length=None):
-        """
-        官方版本的音频预处理逻辑
-        """
         audio = audio.to(self.device)
 
         if in_sr != self.sampling_rate:
@@ -85,20 +90,15 @@ class DiffRhythmVAE:
             
         audio = PadCrop(target_length, randomize=False)(audio)
 
-        # 增加 Batch 维度
         if audio.dim() == 1:
             audio = audio.unsqueeze(0).unsqueeze(0)
         elif audio.dim() == 2:
             audio = audio.unsqueeze(0)
 
-        # 官方 VAE 编码前，必须设置为双声道 (io_channels=2)
         audio = set_audio_channels(audio, self.io_channels)
         return audio
 
     def vae_sample(self, mean, scale):
-        """
-        官方原版重参数化采样 (包含 KL 散度计算)
-        """
         stdev = torch.nn.functional.softplus(scale) + 1e-4
         var = stdev * stdev
         logvar = torch.log(var)
@@ -109,12 +109,8 @@ class DiffRhythmVAE:
 
     @torch.no_grad()
     def encode(self, audio, chunked=True, overlap=32, chunk_size=128):
-        """
-        修复版编码逻辑：处理极短音频，补齐整数倍，避免 i 未定义。
-        """
         samples_per_latent = self.downsampling_ratio
         
-        # 【必须加 1】确保输入音频的长度是 downsampling_ratio (2048) 的整数倍
         remainder = audio.shape[2] % samples_per_latent
         if remainder != 0:
             pad_len = samples_per_latent - remainder
@@ -124,7 +120,6 @@ class DiffRhythmVAE:
         batch_size = audio.shape[0]
         chunk_size_samples = chunk_size * samples_per_latent 
         
-        # 【必须加 2】如果音频长度小于等于一个 Chunk（~5.9秒），直接一次性编码，根本不进循环！
         if not chunked or total_size <= chunk_size_samples:
             return self.model.encode_export(audio)
             
@@ -132,7 +127,7 @@ class DiffRhythmVAE:
         hop_size = chunk_size_samples - overlap_samples
         
         chunks = []
-        i = 0  # <======== 【必须加 3】安全兜底！彻底解决 i 未定义的问题！
+        i = 0  # 兜底变量
         
         for i in range(0, total_size - chunk_size_samples + 1, hop_size):
             chunk = audio[:, :, i:i+chunk_size_samples]
@@ -176,13 +171,9 @@ class DiffRhythmVAE:
 
     @torch.no_grad()
     def decode(self, latents, chunked=True, overlap=32, chunk_size=128):
-        """
-        修复版解码逻辑：避免极短特征导致报错。
-        """
         total_size = latents.shape[2]
         batch_size = latents.shape[0]
         
-        # 【必须加 4】如果 Latent 特征长度小于等于一个 Chunk (128)，直接一次性解码
         if not chunked or total_size <= chunk_size:
             y_final = self.model.decode_export(latents)
             return set_audio_channels(y_final, self.target_channels)
@@ -190,7 +181,7 @@ class DiffRhythmVAE:
         hop_size = chunk_size - overlap
         
         chunks = []
-        i = 0  # <======== 【必须加 5】安全兜底！
+        i = 0  # 兜底变量
         
         for i in range(0, total_size - chunk_size + 1, hop_size):
             chunk = latents[:, :, i : i + chunk_size]

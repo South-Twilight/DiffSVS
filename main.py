@@ -18,8 +18,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint, Callback,LearningRateMo
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 from ldm.util import instantiate_from_config
-import ldm.data
-import ldm.data.tcsinger2_dataset
+import ldm.dataset
+import ldm.dataset.diffsvs_dataset
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -219,8 +219,8 @@ class DataModuleFromConfig(pl.LightningDataModule):# batchloader outputshape sho
 
     def _train_dataloader(self):
         init_fn = None
-        if isinstance(self.datasets["train"], ldm.data.tcsinger2_dataset.JoinManifestSpecs):
-            from ldm.data.tcsinger2_dataset import DDPIndexBatchSampler
+        if isinstance(self.datasets["train"], ldm.dataset.diffsvs_dataset.DiffSVSDataset):
+            from ldm.dataset.diffsvs_dataset import DDPIndexBatchSampler
             dataset = self.datasets["train"]
             main_indices = dataset.ordered_indices()
             batch_sampler = DDPIndexBatchSampler(main_indices, batch_size=self.batch_size, shuffle=True,
@@ -237,8 +237,8 @@ class DataModuleFromConfig(pl.LightningDataModule):# batchloader outputshape sho
 
     def _val_dataloader(self, shuffle=False):
         init_fn = None
-        if isinstance(self.datasets["validation"],ldm.data.tcsinger2_dataset.JoinManifestSpecs):
-            from ldm.data.tcsinger2_dataset import DDPIndexBatchSampler
+        if isinstance(self.datasets["validation"],ldm.dataset.diffsvs_dataset.DiffSVSDataset):
+            from ldm.dataset.diffsvs_dataset import DDPIndexBatchSampler
             dataset = self.datasets["validation"]
             main_indices = dataset.ordered_indices()
             batch_sampler = DDPIndexBatchSampler(main_indices, batch_size=self.batch_size, shuffle=shuffle, drop_last=True)
@@ -653,7 +653,7 @@ if __name__ == "__main__":
                 }
             },
         }
-        default_logger_cfg = default_logger_cfgs["tensorboard"]
+        default_logger_cfg = default_logger_cfgs["wandb"]
         if "logger" in lightning_config:
             logger_cfg = lightning_config.logger
         else:
@@ -771,7 +771,15 @@ if __name__ == "__main__":
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
         if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+            gpus_cfg = lightning_config.trainer.gpus
+            if isinstance(gpus_cfg, int):
+                ngpu = gpus_cfg
+            elif isinstance(gpus_cfg, str):
+                ngpu = len(gpus_cfg.strip(",").split(','))
+            elif isinstance(gpus_cfg, (list, tuple)):
+                ngpu = len(gpus_cfg)
+            else:
+                ngpu = 1
         else:
             ngpu = 1
         if 'accumulate_grad_batches' in lightning_config.trainer:
