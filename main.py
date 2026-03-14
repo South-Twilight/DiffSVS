@@ -1,5 +1,6 @@
 import argparse, os, sys, datetime, glob
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import logging
 import numpy as np
 import time
 import torch
@@ -20,6 +21,59 @@ from pytorch_lightning.utilities import rank_zero_info
 from ldm.util import instantiate_from_config
 import ldm.dataset
 import ldm.dataset.diffsvs_dataset
+
+LOG_DIR_NAME = "logs"
+LOG_FILE_NAME = "train.log"
+LOG_FILE_PREV_NAME = "train_prev.log"
+
+
+def setup_logging(logdir):
+    """
+    配置项目 logging：输出到控制台并写入 logdir/logs/ 下的文件；
+    只保留最新一次运行（train.log）和上一次运行（train_prev.log）的日志。
+    多卡时仅 rank 0 写文件，避免多进程写同一文件。
+    """
+    rank = int(os.environ.get("RANK", "0"))
+    logs_dir = os.path.join(logdir, LOG_DIR_NAME)
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(logs_dir, LOG_FILE_NAME)
+    log_prev_path = os.path.join(logs_dir, LOG_FILE_PREV_NAME)
+
+    # 仅 rank 0 写文件；单卡时 RANK 未设置，为 0
+    if rank != 0:
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        if not root.handlers:
+            sh = logging.StreamHandler(sys.stdout)
+            sh.setFormatter(logging.Formatter("%(asctime)s - [%(levelname)s] - %(name)s - %(message)s"))
+            root.addHandler(sh)
+        return
+
+    # 轮转：当前 train.log -> train_prev.log，再新建 train.log
+    if os.path.exists(log_path):
+        if os.path.exists(log_prev_path):
+            try:
+                os.remove(log_prev_path)
+            except OSError:
+                pass
+        try:
+            os.rename(log_path, log_prev_path)
+        except OSError:
+            pass
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s - [%(levelname)s] - %(name)s - %(message)s")
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    logging.info("Logging 已配置：控制台 + 文件 %s（上一运行: %s）", log_path, log_prev_path)
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -223,14 +277,21 @@ class DataModuleFromConfig(pl.LightningDataModule):# batchloader outputshape sho
             from ldm.dataset.diffsvs_dataset import DDPIndexBatchSampler
             dataset = self.datasets["train"]
             main_indices = dataset.ordered_indices()
+            # max_tokens 从 DataModule 取（供 Sampler 使用）
+            max_tokens = getattr(self, 'max_tokens', 30000)
+            max_sentences = getattr(self, 'max_sentences', self.batch_size)
             batch_sampler = DDPIndexBatchSampler(main_indices, batch_size=self.batch_size, shuffle=True,
-                                                 drop_last=True, max_tokens=self.datasets["train"].max_tokens)
+                                                 drop_last=True, max_tokens=max_tokens,
+                                                 max_sentences=max_sentences,
+                                                 lengths=getattr(dataset, "lengths", None))
+            self._train_batch_sampler = batch_sampler  # 供 DDPBatchSamplerEpochCallback 调用 set_epoch
             loader = DataLoader(dataset, batch_sampler=batch_sampler, sampler=None,
                                 num_workers=self.num_workers, collate_fn=dataset.collater,
                                 worker_init_fn=init_fn)
-            print("train_loader_length", len(loader))
+            logging.info("train_loader_length %s", len(loader))
             return loader
         else:
+            self._train_batch_sampler = None
             return DataLoader(self.datasets["train"], batch_size=self.batch_size ,# sampler=DistributedSampler # np.arange(100),
                             num_workers=self.num_workers, shuffle=True,
                             worker_init_fn=init_fn)
@@ -241,7 +302,11 @@ class DataModuleFromConfig(pl.LightningDataModule):# batchloader outputshape sho
             from ldm.dataset.diffsvs_dataset import DDPIndexBatchSampler
             dataset = self.datasets["validation"]
             main_indices = dataset.ordered_indices()
-            batch_sampler = DDPIndexBatchSampler(main_indices, batch_size=self.batch_size, shuffle=shuffle, drop_last=True)
+            max_tokens = getattr(self, 'max_tokens', 30000)
+            max_sentences = getattr(self, 'max_sentences', self.batch_size)
+            batch_sampler = DDPIndexBatchSampler(main_indices, batch_size=self.batch_size, shuffle=shuffle, drop_last=True,
+                                                 max_tokens=max_tokens, max_sentences=max_sentences,
+                                                 lengths=getattr(dataset, "lengths", None))
             return DataLoader(dataset, batch_sampler=batch_sampler, sampler=None,
                               num_workers=self.num_workers, collate_fn=dataset.collater,
                               worker_init_fn=init_fn)
@@ -266,16 +331,20 @@ class DataModuleFromConfig(pl.LightningDataModule):# batchloader outputshape sho
 
 class LatentDataModuleFromConfig(DataModuleFromConfig):
     '''专为 VAE Latent 范式设计的极简数据模块'''
-    def __init__(self, batch_size, num_workers, data_dir=None,
-                 latent_channels=128, latent_crop_len=500, drop=0, 
+    def __init__(self, batch_size=32, num_workers=4, data_dir=None,
+                 latent_channels=128, latent_crop_len=500, drop=0, drop_rate=None,
+                 max_tokens=80000, max_sentences=64,
                  train=None, validation=None, test=None, predict=None, wrap=False):
-        
-        # 1. 彻底清理无关参数，只保留核心数据路径和 Latent 属性
+        drop_val = drop_rate if drop_rate is not None else drop
+        # max_tokens / max_sentences 只给 Sampler 用，不传给 Dataset
+        self.max_tokens = max_tokens
+        self.max_sentences = max_sentences
+        # 传给 Dataset 的全局配置
         global_dataset_cfg = {
-            'data_dir': data_dir,                 # 统一规范命名为 data_dir
-            'latent_channels': latent_channels,   # VAE Latent 通道数
-            'latent_crop_len': latent_crop_len,   # Latent 时间轴裁剪长度
-            'drop': drop,
+            'data_dir': data_dir,
+            'latent_channels': latent_channels,
+            'latent_crop_len': latent_crop_len,
+            'drop_rate': drop_val,
         }
         
         # 2. 剔除为 None 的参数，保持 kwargs 干净
@@ -306,7 +375,7 @@ class SetupCallback(Callback):# will not load ckpt, just set directories for the
 
     def on_exception(self, trainer, pl_module, exception):
         if trainer.global_rank == 0:
-            print("Summoning checkpoint.")
+            logging.info("Summoning checkpoint.")
             ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
             trainer.save_checkpoint(ckpt_path)
 
@@ -320,13 +389,11 @@ class SetupCallback(Callback):# will not load ckpt, just set directories for the
             if "callbacks" in self.lightning_config:
                 if 'metrics_over_trainsteps_checkpoint' in self.lightning_config['callbacks']:
                     os.makedirs(os.path.join(self.ckptdir, 'trainstep_checkpoints'), exist_ok=True)
-            print("Project config")
-            print(OmegaConf.to_yaml(self.config))
+            logging.info("Project config\n%s", OmegaConf.to_yaml(self.config))
             OmegaConf.save(self.config,
                            os.path.join(self.cfgdir, "{}-project.yaml".format(self.now)))
 
-            print("Lightning config")
-            print(OmegaConf.to_yaml(self.lightning_config))
+            logging.info("Lightning config\n%s", OmegaConf.to_yaml(self.lightning_config))
             OmegaConf.save(OmegaConf.create({"lightning": self.lightning_config}),
                            os.path.join(self.cfgdir, "{}-lightning.yaml".format(self.now)))
 
@@ -451,7 +518,7 @@ class AudioLogger(ImageLogger):
         self.for_specs = for_specs
         self.spec_dir_name = spec_dir_name
         self.sample_rate = sample_rate
-        print('We will not save audio for conditioning and conditioning_rec')
+        logging.info('We will not save audio for conditioning and conditioning_rec')
         if self.for_specs:
             self.vocoder = instantiate_from_config(vocoder_cfg)
 
@@ -485,7 +552,7 @@ class AudioLogger(ImageLogger):
 
     @rank_zero_only
     def _log(self, pl_module, images, batch_idx, split):
-        print(images.keys())
+        logging.info("images keys: %s", list(images.keys()))
         for k in images: # images is a dict,images[k]'s shape is (B,C,H,W)
             if k == 'f0' or k=='f0_gt':
                 continue
@@ -533,6 +600,16 @@ class AudioLogger(ImageLogger):
                     self._log_rec_audio(images[k], images['f0'], tag, global_step, save_rec_path=path)
 
 
+class DDPBatchSamplerEpochCallback(Callback):
+    """每 epoch 开始时调用 DDPIndexBatchSampler.set_epoch，使各卡每轮拿到不同数据子集"""
+    def on_train_epoch_start(self, trainer, pl_module):
+        if hasattr(trainer, 'datamodule') and trainer.datamodule is not None:
+            dm = trainer.datamodule
+            if hasattr(dm, '_train_batch_sampler') and dm._train_batch_sampler is not None:
+                if hasattr(dm._train_batch_sampler, 'set_epoch'):
+                    dm._train_batch_sampler.set_epoch(trainer.current_epoch)
+
+
 class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
@@ -554,6 +631,45 @@ class CUDACallback(Callback):
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
         except AttributeError:
             pass
+
+
+class TrainstepCheckpointCleanup(Callback):
+    """
+    清理按训练步数保存的 checkpoint，只保留最近的若干个。
+    配合 `metrics_over_trainsteps_checkpoint` 使用：
+    - 每 1w steps 由 ModelCheckpoint 保存一次
+    - 本回调在 rank0 上清理旧文件，最多保留 keep_last 个
+    """
+    def __init__(self, ckptdir, subdir="trainstep_checkpoints", keep_last=2, every_n_steps=10000):
+        super().__init__()
+        self.ckptdir = ckptdir
+        self.subdir = subdir
+        self.keep_last = keep_last
+        self.every_n_steps = every_n_steps
+
+    @rank_zero_only
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # 与 ModelCheckpoint 的 every_n_train_steps 对齐，只在对应 step 上触发清理
+        global_step = trainer.global_step
+        if global_step == 0 or (global_step % self.every_n_steps) != 0:
+            return
+        ckpt_dir = os.path.join(self.ckptdir, self.subdir)
+        if not os.path.isdir(ckpt_dir):
+            return
+        # 找到所有 .ckpt 文件，按修改时间从新到旧排序，只保留前 keep_last 个
+        ckpt_files = [
+            os.path.join(ckpt_dir, f)
+            for f in os.listdir(ckpt_dir)
+            if f.endswith(".ckpt") and os.path.isfile(os.path.join(ckpt_dir, f))
+        ]
+        if len(ckpt_files) <= self.keep_last:
+            return
+        ckpt_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for old_path in ckpt_files[self.keep_last:]:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
@@ -603,10 +719,11 @@ if __name__ == "__main__":
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
     seed_everything(opt.seed)
+    setup_logging(logdir)
 
     try:
         # init and save configs
-        print(f"opt.base:{opt.base}")
+        logging.info("opt.base: %s", opt.base)
         configs = [OmegaConf.load(cfg) for cfg in opt.base]
         cli = OmegaConf.from_dotlist(unknown)
         config = OmegaConf.merge(*configs, cli)
@@ -623,7 +740,7 @@ if __name__ == "__main__":
             cpu = True
         else:
             gpuinfo = trainer_config["gpus"]
-            print(f"Running on GPUs {gpuinfo}")
+            logging.info("Running on GPUs %s", gpuinfo)
             cpu = False
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
@@ -668,13 +785,13 @@ if __name__ == "__main__":
                 "dirpath": ckptdir,
                 "filename": "{epoch:06}",
                 "verbose": True,
-                "save_last": True,
-                "save_top_k": 5,
+                "save_last": True,   # 始终保留最新 last.ckpt
+                "save_top_k": 3,     # 根据 val/loss 只保留最优的 3 个
             }
         }
         # use valitdation monitor:
         if hasattr(model, "monitor"):
-            print(f"Monitoring {model.monitor} as checkpoint metric.")
+            logging.info("Monitoring %s as checkpoint metric.", model.monitor)
             default_modelckpt_cfg["params"]["monitor"] = model.monitor
 
         if "modelcheckpoint" in lightning_config:
@@ -682,7 +799,7 @@ if __name__ == "__main__":
         else:
             modelckpt_cfg =  OmegaConf.create()
         modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
-        print(f"Merged modelckpt-cfg: \n{modelckpt_cfg}")
+        logging.info("Merged modelckpt-cfg: \n%s", modelckpt_cfg)
 
 
         # add callback which sets up log directory
@@ -716,6 +833,9 @@ if __name__ == "__main__":
             "cuda_callback": {
                 "target": "main.CUDACallback"
             },
+            "ddp_batch_sampler_epoch": {
+                "target": "main.DDPBatchSamplerEpochCallback"
+            },
         }
 
         # patching the default config for the spectrogram input
@@ -732,7 +852,7 @@ if __name__ == "__main__":
             callbacks_cfg = OmegaConf.create()
 
         if 'metrics_over_trainsteps_checkpoint' in callbacks_cfg:
-            print(
+            logging.info(
                 'Caution: Saving checkpoints every n train steps without deleting. This might require some free space.')
             default_metrics_over_trainsteps_ckpt_dict = {
                 'metrics_over_trainsteps_checkpoint':
@@ -747,7 +867,20 @@ if __name__ == "__main__":
                      }
                     }
             }
+            # 额外添加一个清理回调：只保留最近的若干个按 step 保存的 ckpt
+            default_trainsteps_cleanup_ckpt_dict = {
+                'trainstep_ckpt_cleanup':
+                    {"target": 'main.TrainstepCheckpointCleanup',
+                     'params': {
+                         "ckptdir": ckptdir,
+                         "subdir": "trainstep_checkpoints",
+                         "keep_last": 2,        # 每 1w steps 一个 ckpt，但最多保留 2 个
+                         "every_n_steps": 10000
+                     }
+                    }
+            }
             default_callbacks_cfg.update(default_metrics_over_trainsteps_ckpt_dict)
+            default_callbacks_cfg.update(default_trainsteps_cleanup_ckpt_dict)
 
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
         if 'ignore_keys_callback' in callbacks_cfg and hasattr(trainer_opt, 'ckpt_path'):# false for the former
@@ -764,9 +897,9 @@ if __name__ == "__main__":
         data = instantiate_from_config(config.data)
         data.prepare_data()
         data.setup()
-        print("#### Data #####")
+        logging.info("#### Data #####")
         for k in data.datasets:
-            print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+            logging.info("%s, %s, %s", k, data.datasets[k].__class__.__name__, len(data.datasets[k]))
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
@@ -786,24 +919,24 @@ if __name__ == "__main__":
             accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches
         else:
             accumulate_grad_batches = 1
-        print(f"accumulate_grad_batches = {accumulate_grad_batches}")
+        logging.info("accumulate_grad_batches = %s", accumulate_grad_batches)
         lightning_config.trainer.accumulate_grad_batches = accumulate_grad_batches
         if opt.scale_lr:
             model.learning_rate = accumulate_grad_batches * ngpu * bs * base_lr
-            print(
-                "Setting learning rate to {:.2e} = {} (accumulate_grad_batches) * {} (num_gpus) * {} (batchsize) * {:.2e} (base_lr)".format(
-                    model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr))
+            logging.info(
+                "Setting learning rate to %.2e = %s (accumulate_grad_batches) * %s (num_gpus) * %s (batchsize) * %.2e (base_lr)",
+                model.learning_rate, accumulate_grad_batches, ngpu, bs, base_lr)
         else:
             model.learning_rate = base_lr
-            print("++++ NOT USING LR SCALING ++++")
-            print(f"Setting learning rate to {model.learning_rate:.2e}")
+            logging.info("++++ NOT USING LR SCALING ++++")
+            logging.info("Setting learning rate to %.2e", model.learning_rate)
 
 
         # allow checkpointing via USR1
         def melk(*args, **kwargs):
             # run all checkpoint hooks
             if trainer.global_rank == 0:
-                print("Summoning checkpoint.")
+                logging.info("Summoning checkpoint.")
                 ckpt_path = os.path.join(ckptdir, "last.ckpt")
                 trainer.save_checkpoint(ckpt_path)
 
@@ -818,7 +951,7 @@ if __name__ == "__main__":
 
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
-        print(f"#####  trainer.logdir:{trainer.logdir}  #####")
+        logging.info("#####  trainer.logdir: %s  #####", trainer.logdir)
         # run
         if opt.train:
             try:
@@ -852,4 +985,4 @@ if __name__ == "__main__":
             os.makedirs(os.path.split(dst)[0], exist_ok=True)
             os.rename(logdir, dst)
         if trainer.global_rank == 0:
-            print(trainer.profiler.summary())
+            logging.info("%s", trainer.profiler.summary())

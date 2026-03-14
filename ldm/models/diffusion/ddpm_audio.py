@@ -16,8 +16,8 @@ import math
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
 from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianDistribution
-from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage
-from ldm.models.autoencoder1d import AutoencoderKL
+# from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage
+# from ldm.models.autoencoder1d import AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import DDPM, disabled_train
@@ -389,35 +389,26 @@ class LatentDiffusion_audio(DDPM):
 
     @torch.no_grad()
     def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
-        if predict_cids:
-            if z.dim() == 4:
-                z = torch.argmax(z.exp(), dim=1).long()
-            z = self.first_stage_model.quantize.get_codebook_entry(z, shape=None)
-            z = rearrange(z, 'b h w c -> b c h w').contiguous()
+        """
+        适配当前项目使用的 DiffRhythmVAE 作为 first_stage_model：
+        - z 已经是连续 latent（不再区分 codebook / cids），因此忽略 predict_cids 分支；
+        - 仅按照 scale_factor 做一次还原，然后调用 VAE 的 decode。
+        """
+        # 对齐 LatentDiffusion 的缩放约定：训练时用 z * scale_factor，这里解码前还原回来
+        z = z / self.scale_factor
+        mean, scale = z.chunk(2, dim=1)
+        latents, kl_loss = self.first_stage_model.vae_sample(mean, scale)
+        return self.first_stage_model.decode(latents)
 
-        z = 1. / self.scale_factor * z
-
-
-        if isinstance(self.first_stage_model, VQModelInterface):
-            return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-        else:
-            return self.first_stage_model.decode(z)
-
-    # same as above but without decorator
+    # same as above but可反向传播的版本
     def differentiable_decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
-        if predict_cids:
-            if z.dim() == 4:
-                z = torch.argmax(z.exp(), dim=1).long()
-            z = self.first_stage_model.quantize.get_codebook_entry(z, shape=None)
-            z = rearrange(z, 'b h w c -> b c h w').contiguous()
-
-        z = 1. / self.scale_factor * z
-
-
-        if isinstance(self.first_stage_model, VQModelInterface):
-            return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-        else:
-            return self.first_stage_model.decode(z)
+        """
+        与 decode_first_stage 相同，但保留梯度（用于需要端到端回传到 latent 的场景）。
+        """
+        z = z / self.scale_factor
+        mean, scale = z.chunk(2, dim=1)
+        latents, kl_loss = self.first_stage_model.vae_sample(mean, scale)
+        return self.first_stage_model.decode(latents)
 
     @torch.no_grad()
     def encode_first_stage(self, x):
@@ -782,122 +773,122 @@ class LatentDiffusion_audio(DDPM):
                    quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=True,
                    plot_diffusion_rows=True, **kwargs):
 
-        use_ddim = ddim_steps is not None
+        # use_ddim = ddim_steps is not None
 
-        log = dict()
-        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
-                                           return_first_stage_outputs=True,
-                                           force_c_encode=True,
-                                           return_original_cond=True,
-                                           bs=N) # z is latent,c is condition embedding, xc is condition(caption) list
-        N = min(x.shape[0], N)
-        n_row = min(x.shape[0], n_row)
-        log["inputs"] = x if len(x.shape) == 4 else x.unsqueeze(1)
-        f0=c['acoustic']['f0']
-        log['f0']=f0
-        log['f0_gt']=f0
+        # log = dict()
+        # z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
+        #                                    return_first_stage_outputs=True,
+        #                                    force_c_encode=True,
+        #                                    return_original_cond=True,
+        #                                    bs=N) # z is latent,c is condition embedding, xc is condition(caption) list
+        # N = min(x.shape[0], N)
+        # n_row = min(x.shape[0], n_row)
+        # log["inputs"] = x if len(x.shape) == 4 else x.unsqueeze(1)
+        # f0=c['acoustic']['f0']
+        # log['f0']=f0
+        # log['f0_gt']=f0
 
-        log["reconstruction"] = xrec if len(xrec.shape) == 4 else xrec.unsqueeze(1)
-        if self.model.conditioning_key is not None:
-            if hasattr(self.cond_stage_model, "decode") and self.cond_stage_key != "masked_image":
-                xc = self.cond_stage_model.decode(c)
-                log["conditioning"] = xc
-            elif self.cond_stage_key == "masked_image":
-                log["mask"] = c[:, -1, :, :][:, None, :, :]
-                xc = self.cond_stage_model.decode(c[:, :self.cond_stage_model.embed_dim, :, :])
-                log["conditioning"] = xc
-            elif self.cond_stage_key in ["caption"]:
-                pass
-                # xc = log_txt_as_img((256, 256), batch["caption"])
-                # log["conditioning"] = xc
-            elif self.cond_stage_key == 'class_label':
-                xc = log_txt_as_img((x.shape[2], x.shape[3]), batch["human_label"])
-                log['conditioning'] = xc
-            elif isimage(xc):
-                log["conditioning"] = xc
+        # log["reconstruction"] = xrec if len(xrec.shape) == 4 else xrec.unsqueeze(1)
+        # if self.model.conditioning_key is not None:
+        #     if hasattr(self.cond_stage_model, "decode") and self.cond_stage_key != "masked_image":
+        #         xc = self.cond_stage_model.decode(c)
+        #         log["conditioning"] = xc
+        #     elif self.cond_stage_key == "masked_image":
+        #         log["mask"] = c[:, -1, :, :][:, None, :, :]
+        #         xc = self.cond_stage_model.decode(c[:, :self.cond_stage_model.embed_dim, :, :])
+        #         log["conditioning"] = xc
+        #     elif self.cond_stage_key in ["caption"]:
+        #         pass
+        #         # xc = log_txt_as_img((256, 256), batch["caption"])
+        #         # log["conditioning"] = xc
+        #     elif self.cond_stage_key == 'class_label':
+        #         xc = log_txt_as_img((x.shape[2], x.shape[3]), batch["human_label"])
+        #         log['conditioning'] = xc
+        #     elif isimage(xc):
+        #         log["conditioning"] = xc
 
-        if plot_diffusion_rows:
-            # get diffusion row
-            diffusion_row = list()
-            z_start = z[:n_row]
-            for t in range(self.num_timesteps):
-                if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
-                    t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
-                    t = t.to(self.device).long()
-                    noise = torch.randn_like(z_start)
-                    z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
-                    diffusion_row.append(self.decode_first_stage(z_noisy))
-            if len(diffusion_row[0].shape) == 3:
-                diffusion_row = [x.unsqueeze(1) for x in diffusion_row]
-            diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
-            diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
-            diffusion_grid = rearrange(diffusion_grid, 'b n c h w -> (b n) c h w')
-            diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
-            log["diffusion_row"] = diffusion_grid
+        # if plot_diffusion_rows:
+        #     # get diffusion row
+        #     diffusion_row = list()
+        #     z_start = z[:n_row]
+        #     for t in range(self.num_timesteps):
+        #         if t % self.log_every_t == 0 or t == self.num_timesteps - 1:
+        #             t = repeat(torch.tensor([t]), '1 -> b', b=n_row)
+        #             t = t.to(self.device).long()
+        #             noise = torch.randn_like(z_start)
+        #             z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
+        #             diffusion_row.append(self.decode_first_stage(z_noisy))
+        #     if len(diffusion_row[0].shape) == 3:
+        #         diffusion_row = [x.unsqueeze(1) for x in diffusion_row]
+        #     diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
+        #     diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
+        #     diffusion_grid = rearrange(diffusion_grid, 'b n c h w -> (b n) c h w')
+        #     diffusion_grid = make_grid(diffusion_grid, nrow=diffusion_row.shape[0])
+        #     log["diffusion_row"] = diffusion_grid
 
-        if sample:
-            # get denoise row
-            with self.ema_scope("Plotting"):
-                samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta)
-                # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
-            x_samples = self.decode_first_stage(samples)
-            log["samples"] = x_samples if len(x_samples.shape)==4 else x_samples.unsqueeze(1)
-            if plot_denoise_rows:
-                denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
-                log["denoise_row"] = denoise_grid
+        # if sample:
+        #     # get denoise row
+        #     with self.ema_scope("Plotting"):
+        #         samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
+        #                                                  ddim_steps=ddim_steps,eta=ddim_eta)
+        #         # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
+        #     x_samples = self.decode_first_stage(samples)
+        #     log["samples"] = x_samples if len(x_samples.shape)==4 else x_samples.unsqueeze(1)
+        #     if plot_denoise_rows:
+        #         denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
+        #         log["denoise_row"] = denoise_grid
 
-            if quantize_denoised and not isinstance(self.first_stage_model, AutoencoderKL) and not isinstance(
-                    self.first_stage_model, IdentityFirstStage):
-                # also display when quantizing x0 while sampling
-                with self.ema_scope("Plotting Quantized Denoised"):
-                    samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                             ddim_steps=ddim_steps, eta=ddim_eta,
-                                                             quantize_denoised=True)
-                    # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
-                    #                                      quantize_denoised=True)
-                x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_x0_quantized"] = x_samples if len(x_samples.shape) == 4 else x_samples.unsqueeze(1)
+        #     if quantize_denoised and not isinstance(self.first_stage_model, AutoencoderKL) and not isinstance(
+        #             self.first_stage_model, IdentityFirstStage):
+        #         # also display when quantizing x0 while sampling
+        #         with self.ema_scope("Plotting Quantized Denoised"):
+        #             samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
+        #                                                      ddim_steps=ddim_steps, eta=ddim_eta,
+        #                                                      quantize_denoised=True)
+        #             # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
+        #             #                                      quantize_denoised=True)
+        #         x_samples = self.decode_first_stage(samples.to(self.device))
+        #         log["samples_x0_quantized"] = x_samples if len(x_samples.shape) == 4 else x_samples.unsqueeze(1)
 
-            if inpaint:
-                # make a simple center square
-                b, h, w = z.shape[0], z.shape[2], z.shape[3]
-                mask = torch.ones(N, h, w).to(self.device)
-                # zeros will be filled in
-                mask[:, h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.
-                mask = mask[:, None, ...]
-                with self.ema_scope("Plotting Inpaint"):
+        #     if inpaint:
+        #         # make a simple center square
+        #         b, h, w = z.shape[0], z.shape[2], z.shape[3]
+        #         mask = torch.ones(N, h, w).to(self.device)
+        #         # zeros will be filled in
+        #         mask[:, h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.
+        #         mask = mask[:, None, ...]
+        #         with self.ema_scope("Plotting Inpaint"):
 
-                    samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-                x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_inpainting"] = x_samples
-                log["mask_inpainting"] = mask
+        #             samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
+        #                                         ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+        #         x_samples = self.decode_first_stage(samples.to(self.device))
+        #         log["samples_inpainting"] = x_samples
+        #         log["mask_inpainting"] = mask
 
-                # outpaint
-                mask = 1 - mask
-                with self.ema_scope("Plotting Outpaint"):
-                    samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
-                x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_outpainting"] = x_samples
-                log["mask_outpainting"] = mask
+        #         # outpaint
+        #         mask = 1 - mask
+        #         with self.ema_scope("Plotting Outpaint"):
+        #             samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
+        #                                         ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+        #         x_samples = self.decode_first_stage(samples.to(self.device))
+        #         log["samples_outpainting"] = x_samples
+        #         log["mask_outpainting"] = mask
 
-        if plot_progressive_rows:
-            with self.ema_scope("Plotting Progressives"):
-                # shape = (self.channels, self.mel_dim, self.mel_length) if self.channels > 0 else (self.mel_dim, self.mel_length)
-                mel_length = math.ceil(c['acoustic']['mel2ph'].shape[2] * 1 / 4)
-                shape = (self.channels, self.mel_dim, mel_length) if self.channels > 0 else (self.mel_dim, mel_length)
-                img, progressives = self.progressive_denoising(c, shape=shape, batch_size=N)
-            prog_row = self._get_denoise_row_from_list(progressives, desc="Progressive Generation")
-            log["progressive_row"] = prog_row
+        # if plot_progressive_rows:
+        #     with self.ema_scope("Plotting Progressives"):
+        #         # shape = (self.channels, self.mel_dim, self.mel_length) if self.channels > 0 else (self.mel_dim, self.mel_length)
+        #         mel_length = math.ceil(c['acoustic']['mel2ph'].shape[2] * 1 / 4)
+        #         shape = (self.channels, self.mel_dim, mel_length) if self.channels > 0 else (self.mel_dim, mel_length)
+        #         img, progressives = self.progressive_denoising(c, shape=shape, batch_size=N)
+        #     prog_row = self._get_denoise_row_from_list(progressives, desc="Progressive Generation")
+        #     log["progressive_row"] = prog_row
 
-        if return_keys:
-            if np.intersect1d(list(log.keys()), return_keys).shape[0] == 0:
-                return log
-            else:
-                return {key: log[key] for key in return_keys}
-        return log
+        # if return_keys:
+        #     if np.intersect1d(list(log.keys()), return_keys).shape[0] == 0:
+        #         return log
+        #     else:
+        #         return {key: log[key] for key in return_keys}
+        return {}
 
     def configure_optimizers(self):
         lr = self.learning_rate

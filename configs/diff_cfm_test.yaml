@@ -123,7 +123,7 @@ data:
     max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
     num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
     
-    data_dir: "data/final"           # 你的数据集路径
+    data_dir: "data/final_test"           # 你的数据集路径
     latent_channels: 128
     latent_crop_len: 500             # 训练时随机裁剪的 Latent 最大长度
     drop_rate: 0.1                   # CFG 无条件引导的随机 Drop 概率

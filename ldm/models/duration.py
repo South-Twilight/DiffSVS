@@ -3,6 +3,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
 
+from ldm.dataset.diffsvs_dataset import PH_PAD_ID
 # 导入你原本依赖的时长预测与编码组件
 from utils.commons.rel_transformer import RelTransformerEncoder
 from utils.commons.duration import DurationPredictor, NoteEncoder
@@ -72,8 +73,8 @@ class DurPredModel(pl.LightningModule):
         ph = batch['ph'].long()
         ph_durs = batch['ph_durs'].float()
         
-        # 构建 padding mask (59 是之前 dataloader 里的 padding id)
-        padding_mask = (ph == 59)
+        # 构建 padding mask（与 dataset 一致：PAD ID=0）
+        padding_mask = (ph == PH_PAD_ID)
         
         # 预测时长
         pred_durs = self(ph, notedurs, pitches, notetypes, padding_mask)   # (B, T)
@@ -95,7 +96,7 @@ class DurPredModel(pl.LightningModule):
         ph = batch['ph'].long()
         ph_durs = batch['ph_durs'].float()
         
-        padding_mask = (ph == 59)
+        padding_mask = (ph == PH_PAD_ID)
         pred_durs = self(ph, notedurs, pitches, notetypes, padding_mask)
 
         dur_loss = F.mse_loss(
@@ -123,7 +124,7 @@ class DurPredModel(pl.LightningModule):
         提供给后续主模型生成（推理）时调用的便捷方法
         将对数尺度的时间转换回真实的帧数序列
         """
-        padding_mask = (ph == 59)
+        padding_mask = (ph == PH_PAD_ID)
         log_durs = self(ph, notedurs, pitches, notetypes, padding_mask)
         # 逆运算: exp(x) - 1，并确保不能为负数，四舍五入为整数帧
         durs = torch.clamp(torch.round(torch.exp(log_durs) - 1), min=0.0).long()

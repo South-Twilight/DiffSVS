@@ -28,6 +28,7 @@ DESIRED_ORDER = [
     'word_durs', 'ph_durs', 'ep_notedurs', 
     'txt', 'ph', 'ph2words', 'ep_pitches', 'ep_types', 
     'audio_path', 'mel_path', 
+    'prompt_mel_paths',
     'language', 'singer', 'emotion', 'range', 'pace', 'singing_method', 'technique', 'duration',
     'mix_tech', 'falsetto_tech', 'vibrato_tech', 'breathy_tech', 
     'pharyngeal_tech', 'bubble_tech', 'strong_tech', 'glissando_tech'
@@ -154,6 +155,86 @@ def filter_invalid_data(df):
     df = df.drop(columns=['ph_len'])
     
     logger.info(f"清洗完成: 删除了 {initial_len - len(df)} 条异常数据。")
+    # 关键：清洗后重置索引，保证后续按 position 访问时不越界
+    df = df.reset_index(drop=True)
+    return df
+
+
+def add_prompt_column(df, src_col='mel_path', out_col='prompt_mel_paths', max_prompts=1, pattern=r'(\d+)(?:_mel)?\.npy$'):
+    """
+    基于 TSV 中已有的 *.npy 特征路径，按编号就近为每一行生成 prompt 列。
+    不再对目录做 glob 扫描，只在「同一目录、同一 TSV」内部互相选最近编号，复杂度约 O(N log N)。
+
+    只要你的 latent 也是按 001.npy / 002.npy 或 001_mel.npy 这种命名，就可以直接把 src_col
+    改成 latent 的列名来用：
+
+        df = add_prompt_column(df, src_col='latent_path', out_col='prompt_latent_paths')
+    """
+    if src_col not in df.columns:
+        logger.warning(f"add_prompt_column: 源列 {src_col} 不存在，跳过 prompt 生成")
+        return df
+
+    # 预先为每一行解析出 base_dir 和 数字编号（不访问文件系统）
+    base_dirs = []
+    numbers = []
+    paths = df[src_col].tolist()
+    for p in paths:
+        if isinstance(p, str):
+            base_dir, filename = os.path.split(p)
+            m = re.search(pattern, filename)
+            if m:
+                base_dirs.append(base_dir)
+                numbers.append(int(m.group(1)))
+            else:
+                base_dirs.append(None)
+                numbers.append(None)
+        else:
+            base_dirs.append(None)
+            numbers.append(None)
+
+    df['_prompt_dir'] = base_dirs
+    df['_prompt_num'] = numbers
+
+    # 初始化结果列：默认每行是空列表
+    prompts = [[] for _ in range(len(df))]
+
+    # 按目录 + singer 分组（如果有 singer 列的话），在组内根据编号排序后，
+    # 为每一行挑选最近编号的邻居作为 prompt，避免不同歌手互相当 prompt。
+    if 'singer' in df.columns:
+        tmp = df[['_prompt_dir', '_prompt_num', src_col, 'singer']].reset_index()
+        group_keys = ['_prompt_dir', 'singer']
+    else:
+        tmp = df[['_prompt_dir', '_prompt_num', src_col]].reset_index()
+        group_keys = ['_prompt_dir']
+
+    for _, group in tmp.groupby(group_keys):
+        # 丢弃没有合法编号的行
+        group = group.dropna(subset=['_prompt_num'])
+        if len(group) <= 1:
+            continue
+
+        group_sorted = group.sort_values('_prompt_num')
+        nums = group_sorted['_prompt_num'].to_numpy()
+        files = group_sorted[src_col].to_numpy()
+        indices = group_sorted['index'].to_numpy()
+        n = len(nums)
+
+        for i in range(n):
+            # 这里实现 max_prompts == 1 的高效邻居选择（覆盖目前需求）
+            prev_dist = nums[i] - nums[i - 1] if i > 0 else float('inf')
+            next_dist = nums[i + 1] - nums[i] if i < n - 1 else float('inf')
+
+            if prev_dist == float('inf') and next_dist == float('inf'):
+                continue
+            if prev_dist <= next_dist:
+                j = i - 1
+            else:
+                j = i + 1
+
+            prompts[indices[i]] = [files[j]] if max_prompts >= 1 else []
+
+    df[out_col] = prompts
+    df.drop(columns=['_prompt_dir', '_prompt_num'], inplace=True)
     return df
 
 def reorder_and_save(df, output_path):
@@ -185,15 +266,21 @@ def main():
     df = fill_missing_values(df)
     df = generate_features(df)
     df = filter_invalid_data(df)
+
+    # 3. 可选：基于 *.npy 为每条样本生成 prompt 列
+    # 如果你要用 latent 做 prompt，只需要把 src_col 改成 "latent_path"
+    # 比如：df = add_prompt_column(df, src_col='latent_path', out_col='prompt_latent_paths')
+    if 'mel_path' in df.columns:
+        df = add_prompt_column(df, src_col='mel_path', out_col='prompt_mel_paths', max_prompts=1)
     
-    # 3. 打印统计报告
+    # 4. 打印统计报告
     total_duration = df['duration'].sum()
     logger.info("========================================")
     logger.info(f"📊 最终剩余有效行数: {len(df)}")
     logger.info(f"⏱️ 最终剩余总时长: {total_duration / 3600:.2f} 小时 ({total_duration:.2f} 秒)")
     logger.info("========================================")
     
-    # 4. 整理并保存
+    # 5. 整理并保存
     reorder_and_save(df, OUTPUT_FILE)
 
 if __name__ == "__main__":

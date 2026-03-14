@@ -134,9 +134,9 @@ class DurationDataset(torch.utils.data.Dataset):
         ep_notedurs = ast.literal_eval(data['ep_notedurs'])
         ep_types = ast.literal_eval(data['ep_types'])
         
-        # 2. 映射音素为 ID
+        # 2. 映射音素为 ID（未知音素用 PAD ID=0）
         ph2id = {p: i for i, p in enumerate(ph_set)}
-        ph = [ph2id.get(p, 59) for p in ph] 
+        ph = [ph2id.get(p, 0) for p in ph] 
         
         # 3. 时长下采样映射 (匹配 VAE)
         if self.downsample_factor > 1:
@@ -155,7 +155,7 @@ class DurationDataset(torch.utils.data.Dataset):
             
         elif len(ph) < self.max_ph_len:
             pad_n = self.max_ph_len - len(ph)
-            ph          += [59] * pad_n    # ph PAD = 475
+            ph          += [0] * pad_n    # ph PAD = 0
             ph_durs     += [0] * pad_n    # 时长 PAD = 0
             ep_pitches  += [0]  * pad_n    # pitch PAD = 0
             ep_notedurs += [0.0] * pad_n    # 音符时值 PAD = 0.0

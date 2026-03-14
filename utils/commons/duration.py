@@ -11,7 +11,7 @@ class FrontendWrapper(nn.Module):
         ddconfig,
         # 可以把之前写死的维度参数暴露出来，方便 YAML 配置
         phn_vocab=60,
-        pitch_vocab=129,
+        midi_vocab=129,
         **kwargs
     ):
         """
@@ -20,46 +20,31 @@ class FrontendWrapper(nn.Module):
         """
         super().__init__()
         
-        # 1. 音素编码器 
-        self.ph_encoder = RelTransformerEncoder(
-            phn_vocab, ddconfig['hidden_size'], ddconfig['hidden_size'],
-            ddconfig['hidden_size'] * 4, ddconfig['num_heads'], ddconfig['enc_layers'],
-            ddconfig['enc_ffn_kernel_size'], ddconfig['dropout'], 
-            prenet=ddconfig['enc_prenet'], pre_ln=ddconfig['enc_pre_ln']
-        )
-        
-        # 2. 音符编码器
-        self.note_encoder = NoteEncoder(
-            n_vocab=pitch_vocab, 
-            hidden_channels=ddconfig['hidden_size']
-        )
-
-        # 3. 时长预测器
         self.dur_predictor = DurationPredictor(
             ddconfig['hidden_size'],
             n_chans=ddconfig['hidden_size'],
             n_layers=ddconfig['dur_predictor_layers'],
             dropout_rate=ddconfig['predictor_dropout'],
-            kernel_size=ddconfig['dur_predictor_kernel']
-        )
+            kernel_size=ddconfig['dur_predictor_kernel'])
+        
+        self.note_encoder = NoteEncoder(n_vocab=midi_vocab, hidden_channels=ddconfig['hidden_size'])
+        self.phn_encoder = RelTransformerEncoder(
+                phn_vocab, ddconfig['hidden_size'], ddconfig['hidden_size'],
+                ddconfig['hidden_size']*4, ddconfig['num_heads'], ddconfig['enc_layers'],
+                ddconfig['enc_ffn_kernel_size'], ddconfig['dropout'], prenet=ddconfig['enc_prenet'], pre_ln=ddconfig['enc_pre_ln'])
+        
 
     def forward(self, ph, notedurs, pitches, notetypes, padding_mask=None):
         """
         前向传播：
         不仅要预测时长，还要把蕴含发音规律的特征 (encoded_text) 传给后面的 Diffusion！
         """
-        # 获取音素与音符嵌入
-        ph_emb = self.ph_encoder(ph) 
+        phn_emb = self.phn_encoder(ph)
         note_features = self.note_encoder(pitches, notedurs, notetypes)
+        encoded_text = phn_emb + note_features
         
-        # 🌟 核心：融合特征 (这就是将要被拉伸并喂给 DiT 的 c_text 雏形)
-        encoded_text = ph_emb + note_features
-        
-        # 预测 duration (B, L)
         pred_durs_log = self.dur_predictor(encoded_text, x_padding=padding_mask)
-
-        # 把特征和预测时长一起打包送出去
-        return encoded_text, pred_durs_log
+        return pred_durs_log
 
 class LayerNorm(torch.nn.LayerNorm):
     """Layer normalization module.

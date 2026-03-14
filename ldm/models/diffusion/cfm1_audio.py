@@ -55,8 +55,13 @@ class CFM(LatentDiffusion_audio):
         t_unsqueeze = t.unsqueeze(1).unsqueeze(1).float() / self.num_timesteps
         x_noisy = t_unsqueeze * x1 + (1. - (1 - self.sigma_min) * t_unsqueeze) * x0
 
-        f0_gt=cond['acoustic']['f0'] 
-        model_output, lb_loss,f0_pred = self.apply_model(x_noisy, t, cond)
+        f0_gt = cond['acoustic']['f0']
+        # 兼容返回 (u_pred, loss, f0_pred) 或 (u_pred, loss, f0_pred, extra)
+        apply_out = self.apply_model(x_noisy, t, cond)
+        if isinstance(apply_out, (list, tuple)) and len(apply_out) >= 3:
+            model_output, lb_loss, f0_pred = apply_out[:3]
+        else:
+            raise ValueError("Unexpected apply_model output format in CFM.p_losses")
         
         # ---------- 每 5000 步绘制前 5 条曲线 ----------
         if self.training and (self.global_step % 5000 == 0):
@@ -168,7 +173,12 @@ class Wrapper(nn.Module):
 
     def forward(self, t, x, args):
         t = torch.tensor([t * 1000] * x.shape[0], device=t.device).long()
-        results,loss= self.net.apply_model(x, t, self.cond)
+        out = self.net.apply_model(x, t, self.cond)
+        # 兼容 (u_pred, loss, f0_pred) 或 (u_pred, loss, f0_pred, extra)
+        if isinstance(out, (list, tuple)):
+            results = out[0]
+        else:
+            results = out
         return results
 
 
@@ -185,8 +195,19 @@ class Wrapper_cfg(nn.Module):
 
     def forward(self, t, x, args):
         t = torch.tensor([t * 1000] * x.shape[0], device=t.device).long()
-        e_t,loss,f0_pred= self.net.apply_model(x, t, self.cond)
-        e_t_uncond,loss,f0_pred_uncond= self.net.apply_model(x, t, self.unconditional_conditioning)
+        out = self.net.apply_model(x, t, self.cond)
+        out_uncond = self.net.apply_model(x, t, self.unconditional_conditioning)
+
+        # 兼容 (u_pred, loss, f0_pred) 或 (u_pred, loss, f0_pred, extra)
+        if isinstance(out, (list, tuple)) and len(out) >= 3:
+            e_t, loss, f0_pred = out[:3]
+        else:
+            raise ValueError("Unexpected apply_model output format in Wrapper_cfg.forward (cond)")
+
+        if isinstance(out_uncond, (list, tuple)) and len(out_uncond) >= 3:
+            e_t_uncond, loss_uncond, f0_pred_uncond = out_uncond[:3]
+        else:
+            raise ValueError("Unexpected apply_model output format in Wrapper_cfg.forward (uncond)")
         e_t = e_t_uncond + self.unconditional_guidance_scale * (e_t - e_t_uncond)    
         f0_pred = f0_pred_uncond + self.unconditional_guidance_scale * (f0_pred - f0_pred_uncond)    
 

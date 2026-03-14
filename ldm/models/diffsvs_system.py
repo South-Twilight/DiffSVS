@@ -1,176 +1,258 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ldm.models.diffusion.cfm1_audio import CFM # 请确保这里指向你本地的 CFM 基类
+import logging
+from ldm.models.diffusion.cfm1_audio import CFM
 from ldm.util import instantiate_from_config
+from ldm.dataset.diffsvs_dataset import PHN_PAD_ID
 
 class LengthRegulator(nn.Module):
     """根据 duration 将 Token 级别的特征扩展到 Frame 级别"""
     def forward(self, x, dur):
-        # x: [B, L, D], dur: [B, L]
         out = []
         for i in range(x.size(0)):
-            # 按照预测或真实的帧数，把每个音素的特征复制拉长
             expanded = torch.repeat_interleave(x[i], dur[i], dim=0)
             out.append(expanded)
-        # Pad 对齐到 Batch 内最大长度
         return torch.nn.utils.rnn.pad_sequence(out, batch_first=True)
 
 class BlurredBoundaryAdaptor(nn.Module):
-    """
-    适配 f=2048 极端压缩的 BBC 边界平滑器
-    因为 1 个 Latent 帧包含了约 46ms，所以只掩码 1 帧就足够覆盖协同发音了
-    """
+    """适配 f=2048 极端压缩的 BBC 边界平滑器"""
     def __init__(self, hidden_dim):
         super().__init__()
-        # 使用极小核的 Depthwise 卷积进行平滑，避免过度模糊导致吞音
         self.blur_conv = nn.Conv1d(
-            hidden_dim, hidden_dim, 
+            hidden_dim, hidden_dim,
             kernel_size=3, padding=1, groups=hidden_dim
         )
         self.act = nn.SiLU()
 
     def forward(self, c_text, dur, is_training=False):
-        # c_text: [B, T_lat, D]
         if is_training:
             B, T_lat, D = c_text.shape
-            # 算出每个音素的边界位置（当前帧所在的索引）
-            boundaries = torch.cumsum(dur, dim=1) 
+            boundaries = torch.cumsum(dur, dim=1)
             mask = torch.ones((B, T_lat, 1), device=c_text.device)
-            
             for b in range(B):
                 for bndry in boundaries[b]:
-                    # 防止越界
-                    if 0 <= bndry < T_lat:
-                        # 80% 概率触发，增加模型的抗干扰鲁棒性
-                        if torch.rand(1).item() < 0.8: 
-                            # 🌟 极限压缩特调：精准挖空边界所在的这 1 帧
-                            mask[b, bndry, :] = 0
-            
-            # 乘以掩码，将边界特征强制置零
+                    if 0 <= bndry < T_lat and torch.rand(1).item() < 0.8:
+                        mask[b, bndry, :] = 0
             c_text = c_text * mask
-
-        # 用 Conv1d 把空洞“糊”起来，形成平滑的声学过渡
         x = c_text.transpose(1, 2)
         x = self.blur_conv(x)
         x = self.act(x)
-        # 残差连接：保留主体特征，只在边界处柔化
-        out = c_text + x.transpose(1, 2)
-        return out
+        return c_text + x.transpose(1, 2)
 
 
 class DiffSVS_System(CFM):
-    def __init__(self, unet_config, frontend_config, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        # 1. 实例化打工人 (MMAudio Backbone)
-        self.model = instantiate_from_config(unet_config)
-        
-        # 2. 实例化前台 (FrontendWrapper)
+    """
+    MMDiT 歌声合成：audio 模态（latent）+ text 模态（music score），self-attention 做模态交互，单模态 audio 输出。
+    - 输入：batch['audio'] = audio latent，batch['cond'] = 乐谱（phn, note dur, note pitch）+ dur_gt/spk_id/f0_gt
+    - 流程：cond 经 frontend → LR → BBC 得到 frame 级 text 特征，与 audio latent 在 backbone 内做双流 self-attention
+    - 输出：仅预测 audio 流的速度场（flow），用于 CFM 去噪得到音频 latent
+    """
+    def __init__(self, use_bbc=False, **kwargs):
+        frontend_config = kwargs.pop("frontend_config", None)
+        loss_weights = kwargs.pop("loss_weights", {})
+        # 各损失项权重：默认都为 1.0，可在 YAML 中通过 model.params.loss_weights 配置
+        self.loss_w_cfm = float(loss_weights.get("cfm", 1.0))
+        if self.loss_w_cfm > 0.01:
+            self.loss_w_cfm *= 0.9999
+        self.loss_w_f0 = float(loss_weights.get("f0_uv", 1.0))
+        self.loss_w_uv = float(loss_weights.get("f0_uv", 1.0))  # 与 f0 共用权重
+        self.loss_w_dur = float(loss_weights.get("dur", 1.0))
+        super().__init__(**kwargs)
+        # 此处 self.model 仍为 DiffusionWrapper(diffusion_model=Backbone, conditioning_key)，无需替换
+
+        if frontend_config is None:
+            raise ValueError("DiffSVS_System 需要 frontend_config")
+
         self.frontend = instantiate_from_config(frontend_config)
-        
-        # 3. 实例化边界处理流水线
-        # 注意这里获取 frontend_config 里配置的 hidden_channels
         hidden_dim = frontend_config.params.get("hidden_channels", 768)
         self.length_regulator = LengthRegulator()
         self.bbc_adaptor = BlurredBoundaryAdaptor(hidden_dim=hidden_dim)
-        
-        # 🔥 全面解冻：开启端到端联合训练
+        self.use_bbc = use_bbc
+
         self.frontend.train()
-        for param in self.frontend.parameters():
-            param.requires_grad = True
+        for p in self.frontend.parameters():
+            p.requires_grad = True
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        """确保整个 batch（含 audio、cond 字典）都搬到当前 device，否则 PL 对 dict batch 不会自动迁移。"""
+        if batch is None:
+            return batch
+        if isinstance(batch, dict):
+            out = {}
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    out[k] = v.to(device)
+                elif isinstance(v, dict):
+                    out[k] = {kk: vv.to(device) if isinstance(vv, torch.Tensor) else vv for kk, vv in v.items()}
+                else:
+                    out[k] = v
+            return out
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     def configure_optimizers(self):
-        """重写优化器，将大厨(Backbone)和前台(Frontend)的参数一并收编"""
+        """把 frontend（含 duration 预测器）参数加入优化器，否则 duration loss 不会更新 frontend。"""
+        lr = self.learning_rate
+        # 必须包含 model 与 frontend，这样 loss_dur 的反向才会更新 frontend
         params = list(self.model.parameters()) + list(self.frontend.parameters())
-        if self.learn_logvar:
+        if getattr(self, "cond_stage_trainable", False) and hasattr(self, "cond_stage_model"):
+            params += list(self.cond_stage_model.parameters())
+        if getattr(self, "learn_logvar", False):
             params.append(self.logvar)
-            
-        opt = torch.optim.AdamW(params, lr=self.learning_rate)
+        opt = torch.optim.AdamW(params, lr=lr)
+        if getattr(self, "use_scheduler", False) and hasattr(self, "scheduler_config"):
+            from ldm.util import instantiate_from_config
+            from torch.optim.lr_scheduler import LambdaLR
+            scheduler_cfg = instantiate_from_config(self.scheduler_config)
+            scheduler = [
+                {
+                    "scheduler": LambdaLR(opt, lr_lambda=scheduler_cfg.schedule),
+                    "interval": "step",
+                    "frequency": 1,
+                }
+            ]
+            return [opt], scheduler
         return opt
+
+    def get_learned_conditioning(self, c):
+        """乐谱（text 模态）直接透传，在 apply_model 里经 frontend 编码为 frame 级特征。"""
+        if isinstance(c, dict) and "phn" in c:
+            return c
+        return super().get_learned_conditioning(c) if hasattr(super(), "get_learned_conditioning") else c
+
+    @torch.no_grad()
+    def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
+                  cond_key=None, return_original_cond=False, bs=None):
+        """原版接口：x = batch['audio']（audio 模态 latent），c = batch['cond']（text 模态乐谱）。"""
+        x = batch.get(self.first_stage_key)
+        if x is None:
+            x = super().get_input(batch, k)
+        if bs is not None:
+            x = x[:bs]
+        x = x.to(self.device)
+        z = (x * self.scale_factor).detach()
+
+        if self.model.conditioning_key is not None:
+            key = cond_key if cond_key is not None else self.cond_stage_key
+            if key in batch:
+                xc = batch[key]
+                c = self.get_learned_conditioning(xc)
+                # 如果 batch 中提供了 prompt latent，则一并放入 cond，供 backbone 使用
+                if "prompt" in batch and isinstance(c, dict):
+                    prompt = batch["prompt"]
+                    if bs is not None and isinstance(prompt, torch.Tensor):
+                        prompt = prompt[:bs]
+                    c["prompt"] = prompt
+                if bs is not None and isinstance(c, dict):
+                    c = {k: v[:bs] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in c.items()}
+                # 把 cond 里所有 tensor 放到当前 device，否则 frontend/backbone 会在 CPU 上算，显存占用低且可能 device 报错
+                if c is not None and isinstance(c, dict):
+                    c = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in c.items()}
+            else:
+                c = None
+                xc = None
+        else:
+            c = None
+            xc = None
+
+        out = [z, c]
+        if return_first_stage_outputs:
+            xrec = self.decode_first_stage(z)
+            out.extend([x, xrec])
+        if return_original_cond:
+            out.append(xc)
+        return out
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
         """
-        核心数据流转拦截器：
-        文本 -> 提特征 -> 算时长 -> 拉伸 -> 模糊边界 -> 强对齐 -> 送给 DiT
+        audio 模态 x_noisy + text 模态 cond（music score）→ frontend 得到 frame 级 text 特征 →
+        与 audio 在 backbone 内 concat 后做 self-attention，仅从 audio 流输出 flow / F0。
         """
-        # 1. 解析 DataLoader 吐出的条件字典
-        ph = cond['ph'].long()               # [B, L]
-        pitches = cond['pitches'].long()     # [B, L]
-        notedurs = cond['notedurs'].float()  # [B, L]
-        notetypes = cond['notetypes'].long() # [B, L]
-        y_spk = cond['spk_id']               # [B]
-        f0_gt = cond.get('f0_gt', None)
-        infer = cond.get('infer', not self.training)
-        
-        # 根据你提供的数据结构，Padding ID 是 59
-        padding_mask = (ph == 59)
-        
-        # 2. 🌟 一键呼叫前端，拿到连续语义特征和预测时长
-        encoded_text, pred_dur_log = self.frontend(ph, notedurs, pitches, notetypes, padding_mask)
-        
-        # 3. 决定拉伸使用的时长 (训练用真实，推理用预测)
+        # text 模态：乐谱 token（phn, note dur, note pitch）
+        phn = cond["phn"].long()
+        midi = cond["pitches"].long()
+        notedurs = cond["notedurs"].float()
+        notetypes = cond["notetypes"].long()
+        y_spk = cond["spk_id"]
+        f0_gt = cond.get("f0_gt", None)
+        infer = cond.get("infer", not self.training)
+        # 可选：prompt latent，形状 [B, C, T]
+        prompt_latent = cond.get("prompt", None)
+        padding_mask = (phn == PHN_PAD_ID)
+
+        pred_dur_log = self.frontend(phn, notedurs, midi, notetypes, padding_mask)
+
         if infer:
-            # 预测的是 log(dur + 1)，逆运算并限制最小为 1 帧防止崩溃
             dur = torch.clamp(torch.round(torch.exp(pred_dur_log) - 1), min=1).long()
         else:
-            dur = cond['dur_gt'].long() 
-            
-        # 4. 拉伸与 BBC 模糊处理
-        c_text = self.length_regulator(encoded_text, dur)
-        c_text = self.bbc_adaptor(c_text, dur, is_training=not infer)
-        
-        # 5. ⚠️ 强制时间轴对齐 (极度重要)
-        # 真实数据的音频经过 VAE 压缩后的长度，可能和 Dur_gt 累加有一两帧的舍入误差
+            # 送入 LengthRegulator 的 dur 至少为 1，避免 repeat_interleave(..., 0) 产生空序列
+            dur = cond["dur_gt"].long().clamp(min=1)
+
+        phn = self.length_regulator(phn, dur)
+        midi = self.length_regulator(midi, dur)
+        if self.use_bbc:
+            phn = self.bbc_adaptor(phn, dur, is_training=not infer)
+        # 与 audio 帧对齐
         max_len = x_noisy.shape[2]
-        if c_text.shape[1] > max_len:
-            c_text = c_text[:, :max_len, :]
-        elif c_text.shape[1] < max_len:
-            pad_len = max_len - c_text.shape[1]
-            c_text = F.pad(c_text, (0, 0, 0, pad_len))
-            
-        # 6. 送入 Backbone 预测速度场和 F0
-        u_pred, f0_uv_loss, f0_pred = self.model(
-            x_noisy, t, c_text, y_spk, f0_gt=f0_gt, infer=infer
-        )
+        if phn.shape[1] > max_len:
+            phn = phn[:, :max_len]
+        elif phn.shape[1] < max_len:
+            phn = F.pad(phn, (0, max_len - phn.shape[1]))
         
+        if midi.shape[1] > max_len:
+            midi = midi[:, :max_len]
+        elif midi.shape[1] < max_len:
+            midi = F.pad(midi, (0, max_len - midi.shape[1]))
+
+        cond = {
+            "c_concat": {
+                "phn": phn,
+                "midi": midi,
+                "f0_gt": f0_gt,
+                "spk_id": y_spk,
+                "prompt": prompt_latent,
+            },
+            "c_crossattn": None,
+            "name": None,
+            "infer": infer
+        } # only concat, no crossattn
+        out = self.model(x_noisy, t, **cond)
+
         if not infer:
-            return u_pred, f0_uv_loss, f0_pred, pred_dur_log
-        else:
-            return u_pred, f0_uv_loss, f0_pred, dur
+            return out[0], out[1], out[2], pred_dur_log
+        return out[0], out[1], out[2], pred_dur_log
 
     def p_losses(self, x_start, cond, t, noise=None):
-        """计算三大总 Loss 并返回字典用于日志记录"""
         noise = torch.randn_like(x_start) if noise is None else noise
-        
-        # 构建 CFM (Flow Matching) 的插值与目标速度场 ut
         t_unsqueeze = t.unsqueeze(1).unsqueeze(2).float() / self.num_timesteps
-        x_noisy = t_unsqueeze * x_start + (1. - (1 - self.sigma_min) * t_unsqueeze) * noise
-        ut = x_start - (1 - self.sigma_min) * noise 
-        
-        # 跑一整遍前向传播
-        u_pred, f0_uv_loss, f0_pred, pred_dur_log = self.apply_model(x_noisy, t, cond)
-        
-        # Loss 1: Flow 速度场回归
-        loss_cfm = F.mse_loss(u_pred, ut, reduction='mean')
-        
-        # Loss 2: 时长预测 Loss (忽略 Padding 区域，且 padding ID = 59)
-        padding_mask = (cond['ph'] == 59)
-        dur_gt_log = torch.log1p(cond['dur_gt'].float())
-        loss_dur = F.mse_loss(
-            pred_dur_log.masked_select(~padding_mask), 
-            dur_gt_log.masked_select(~padding_mask),
-            reduction='mean'
+        x_noisy = t_unsqueeze * x_start + (1.0 - (1 - self.sigma_min) * t_unsqueeze) * noise
+        ut = x_start - (1 - self.sigma_min) * noise
+
+        u_pred, ret_loss_dict, f0_out, pred_dur_log = self.apply_model(x_noisy, t, cond)
+
+        # Flow matching 主损失：只对 target 帧计算，已经在apply_model中mask掉了prompt段
+        loss_cfm = self.get_loss(u_pred, ut, mean=True)
+
+        padding_mask = cond["phn"] == PHN_PAD_ID
+        dur_gt_log = torch.log1p(cond["dur_gt"].float().clamp(min=0))
+        pred_dur_valid = pred_dur_log.masked_select(~padding_mask)
+        dur_gt_valid = dur_gt_log.masked_select(~padding_mask)
+        if pred_dur_valid.numel() > 0:
+            loss_dur = F.mse_loss(pred_dur_valid, dur_gt_valid, reduction="mean")
+        else:
+            loss_dur = torch.tensor(0.0, device=x_start.device, dtype=x_start.dtype)
+
+        total_loss = (
+            self.loss_w_cfm * loss_cfm +
+            self.loss_w_f0 * ret_loss_dict["loss_f0"] +
+            self.loss_w_uv * ret_loss_dict["loss_uv"] +
+            self.loss_w_dur * loss_dur
         )
-        
-        # 聚合三大 Loss (权重可以后续根据 TensorBoard 的曲线量级动态调整)
-        total_loss = loss_cfm + 1.0 * f0_uv_loss + 1.0 * loss_dur
-        
+        prefix = "train" if self.training else "val"
         loss_dict = {
-            'train/loss_cfm': loss_cfm.detach(),
-            'train/loss_f0_uv': f0_uv_loss.detach(),
-            'train/loss_dur': loss_dur.detach(),
-            'train/total_loss': total_loss.detach()
+            f"{prefix}/loss_cfm": loss_cfm.detach(),
+            f"{prefix}/loss_f0_uv": ret_loss_dict["loss_f0"].detach(),
+            f"{prefix}/loss_dur": loss_dur.detach(),
+            f"{prefix}/total_loss": total_loss.detach(),
         }
-        
         return total_loss, loss_dict

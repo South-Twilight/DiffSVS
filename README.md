@@ -8,6 +8,11 @@ data directory: `./data/final`
 ## Train DiffSVS
 
 ```python
-python main.py --base configs/diff_cfm.yaml -t --gpus 0,1
+
+CUDA_VISIBLE_DEVICES=4 python main.py --base configs/diff_cfm_test.yaml -t --gpus 1
+
+CUDA_VISIBLE_DEVICES=4,5 python main.py \
+  --base configs/diff_cfm.yaml  -t \
+  --gpus 3
 
 ```
