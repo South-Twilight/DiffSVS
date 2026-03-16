@@ -151,7 +151,7 @@ class DiffSVSDataset(Dataset):
     """
     def __init__(
         self, split, data_dir, sample_rate=44100, hop_size=2048,
-        latent_crop_len=500, drop_rate=0.1, **kwargs
+        latent_crop_len=500, drop_rate=0.1, max_prompt_len=100, **kwargs
     ):
         """
         :param data_dir: 存放 tsv 文件和 singer.txt 的目录路径 (如 ./data/final)
@@ -162,6 +162,7 @@ class DiffSVSDataset(Dataset):
         self.hop_size = hop_size
         self.latent_crop_len = latent_crop_len
         self.drop_rate = drop_rate
+        self.max_prompt_len = int(max_prompt_len) if max_prompt_len is not None else 100
         
         # 1. 直接指向对应的 tsv 文件
         manifest_path = os.path.join(data_dir, f'{split}.tsv')
@@ -286,26 +287,19 @@ class DiffSVSDataset(Dataset):
             cand_list = []
 
         if isinstance(cand_list, list) and len(cand_list) > 0:
-            # 在候选 prompt 里随机挑一条做 data augmentation
+            # 在候选 prompt 里随机挑一条做 data augmentation，当前情况下cond_list只有一条
             prompt_latent_path = random.choice(cand_list)
             if isinstance(prompt_latent_path, str) and os.path.exists(prompt_latent_path):
                 prompt_latent_z = np.load(prompt_latent_path).astype(np.float32)  # [C, T_p]
-                # 为了后续模型使用方便，这里将 prompt 在帧维上对齐到目标 latent 的长度：
-                # - 如果更长：随机裁一段与 target_T 等长
-                # - 如果更短：右侧 zero-pad 到 target_T
+                # 限制 prompt latent 的有效长度，避免在 time 维度上过长：
+                # - 至多保留 max_prompt_len 帧（默认 100）
+                # - 如果更长：随机裁一段长度为 max_prompt_len
+                # - 如果更短：保持原长度，不再强行对齐到 target_T
                 T_p = prompt_latent_z.shape[1]
-                if T_p > target_T:
-                    max_start = T_p - target_T
+                if T_p > self.max_prompt_len:
+                    max_start = T_p - self.max_prompt_len
                     start = random.randint(0, max_start)
-                    prompt_latent_z = prompt_latent_z[:, start:start+target_T]
-                elif T_p < target_T:
-                    pad_width = target_T - T_p
-                    prompt_latent_z = np.pad(
-                        prompt_latent_z,
-                        ((0, 0), (0, pad_width)),
-                        mode='constant',
-                        constant_values=0.0,
-                    )
+                    prompt_latent_z = prompt_latent_z[:, start:start + self.max_prompt_len]
         
         # ==========================================
         # 3. 安全提取歌手 ID (把未知和空值统统打入 0 号冷宫)

@@ -46,32 +46,6 @@ def safe_literal_eval(val):
             return val
     return val
 
-def calculate_prompt_mel(mel_path, max_prompts=10):
-    """根据 mel_path 寻找同目录下最接近的音频作为 prompt_mel (当前未在主流中使用，保留备用)"""
-    if not isinstance(mel_path, str) or not os.path.exists(mel_path):
-        return None
-
-    base_dir, filename = os.path.split(mel_path)
-    match = re.search(r'(\d+)(?:_mel)?\.npy$', filename)
-    if not match:
-        return None
-
-    original_number = int(match.group(1))
-    candidate_files = glob(os.path.join(base_dir, '*.npy'))
-
-    def extract_number(file):
-        m = re.search(r'(\d+)(?:_mel)?\.npy$', file)
-        return int(m.group(1)) if m else None
-
-    valid_files = [(f, extract_number(f)) for f in candidate_files]
-    valid_files = [(f, num) for f, num in valid_files if num is not None and f != mel_path]
-
-    if not valid_files:
-        return None
-
-    valid_files.sort(key=lambda x: abs(x[1] - original_number))
-    return [f for f, _ in valid_files[:max_prompts]]
-
 # ==========================================
 # 2. 核心数据处理函数
 # ==========================================

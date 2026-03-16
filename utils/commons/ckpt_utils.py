@@ -10,7 +10,8 @@ def get_last_checkpoint(work_dir, steps=None):
     ckpt_paths = get_all_ckpts(work_dir, steps)
     if len(ckpt_paths) > 0:
         last_ckpt_path = ckpt_paths[0]
-        checkpoint = torch.load(last_ckpt_path, map_location='cpu')
+        # 显式允许加载完整 ckpt（包含 optimizer 等状态），避免 PyTorch 2.6 的 weights_only 默认限制
+        checkpoint = torch.load(last_ckpt_path, map_location='cpu', weights_only=False)
     return checkpoint, last_ckpt_path
 
 
@@ -27,7 +28,7 @@ def load_ckpt(cur_model, ckpt_base_dir, model_name='model', force=True, strict=T
     if os.path.isfile(ckpt_base_dir):
         base_dir = os.path.dirname(ckpt_base_dir)
         ckpt_path = ckpt_base_dir
-        checkpoint = torch.load(ckpt_base_dir, map_location='cpu')
+        checkpoint = torch.load(ckpt_base_dir, map_location='cpu', weights_only=False)
     else:
         base_dir = ckpt_base_dir
         checkpoint, ckpt_path = get_last_checkpoint(ckpt_base_dir)

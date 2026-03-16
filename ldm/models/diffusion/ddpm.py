@@ -184,7 +184,8 @@ class DDPM(pl.LightningModule):
                     print(f"{context}: Restored training weights")
 
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
-        sd = torch.load(path, map_location="cpu")
+        # 显式关闭 weights_only 安全限制，兼容旧格式 ckpt（本项目 ckpt 来源可控）
+        sd = torch.load(path, map_location="cpu", weights_only=False)
         if "state_dict" in list(sd.keys()):
             sd = sd["state_dict"]
         keys = list(sd.keys())

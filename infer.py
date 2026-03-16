@@ -12,6 +12,7 @@ import pandas as pd
 import ast
 import torch
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 from torch.distributed import init_process_group
 from torch.utils.data import DataLoader, DistributedSampler
 from omegaconf import OmegaConf
@@ -32,7 +33,6 @@ def parse_args():
     parser.add_argument("--config", type=str, default="configs/diff_cfm.yaml", help="模型 config")
     parser.add_argument("--ckpt", type=str, required=True, help="模型权重路径")
     parser.add_argument("--manifest_path", type=str, default="data/final_test/test.tsv")
-    parser.add_argument("--singer_txt", type=str, default="data/final_test/singer.txt")
     parser.add_argument("--ddim_steps", type=int, default=50, help="ODE 积分步数")
     parser.add_argument("--n_samples", type=int, default=1)
     parser.add_argument("--scale", type=float, default=4.0, help="CFG 引导系数")
@@ -65,7 +65,7 @@ def normalize_loudness(wav, target_loudness=-23):
 # 推理用 Eval Dataset（与 diffsvs_dataset 词表一致）
 # ==========================================
 class DiffSVSEvalDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest_path, singer_txt_path, max_eval=50, max_duration=20.0):
+    def __init__(self, manifest_path, max_eval=50, max_duration=20.0):
         super().__init__()
         df = pd.read_csv(manifest_path, sep="\t")
         if max_duration > 0 and "duration" in df.columns:
@@ -73,13 +73,6 @@ class DiffSVSEvalDataset(torch.utils.data.Dataset):
         if max_eval > 0 and len(df) > max_eval:
             df = df.sample(n=max_eval, random_state=42)
         self.dataset = df.reset_index(drop=True)
-
-        if os.path.exists(singer_txt_path):
-            with open(singer_txt_path, "r", encoding="utf-8") as f:
-                unique_singers = [line.strip() for line in f if line.strip()]
-            self.singer_to_id = {s: i for i, s in enumerate(unique_singers)}
-        else:
-            self.singer_to_id = {"unknown": 0}
 
     def __len__(self):
         return len(self.dataset)
@@ -94,10 +87,8 @@ class DiffSVSEvalDataset(torch.utils.data.Dataset):
         ph2id = {p: i for i, p in enumerate(phn_set)}
         phn_ids = [ph2id.get(p, PHN_PAD_ID) for p in phn_str_list]
 
-        singer = row.get("singer", "unknown")
-        if pd.isna(singer):
-            singer = "unknown"
-        spk_id = self.singer_to_id.get(str(singer).strip(), 0)
+        # 推理阶段不再需要显式的 singer 映射，统一使用单一说话人 ID=0
+        spk_id = 0
 
         # 推理用：优先用显式的 audio_path；否则从 latent/mel 路径推回 wav 路径
         audio_path = row.get("audio_path", row.get("latent_path", row.get("mel_path", "")))
@@ -107,9 +98,24 @@ class DiffSVSEvalDataset(torch.utils.data.Dataset):
         # teacher_forcing 用：GT latent 路径（128 维 [mean, scale]）
         latent_path = row.get("latent_path", row.get("mel_path", ""))
 
+        # 可选：prompt latent 路径（与训练时 postprocess 生成的一致）
+        prompt_latent_path = ""
+        if "prompt_latent_paths" in row:
+            val = row["prompt_latent_paths"]
+            if isinstance(val, str) and val.strip():
+                try:
+                    paths = ast.literal_eval(val)
+                    if isinstance(paths, (list, tuple)) and len(paths) > 0:
+                        prompt_latent_path = paths[0]
+                except Exception:
+                    prompt_latent_path = ""
+        elif "prompt_latent_path" in row:
+            prompt_latent_path = str(row["prompt_latent_path"])
+
         return {
             "audio_path": audio_path,
             "latent_path": latent_path,
+            "prompt_latent_path": prompt_latent_path,
             "name": row.get("item_name", f"test_{idx}"),
             "phn": torch.tensor(phn_ids, dtype=torch.long),
             "pitches": torch.tensor(ep_pitches, dtype=torch.long),
@@ -136,7 +142,8 @@ def eval_collate_fn(batch):
     names = [b["name"] for b in batch]
     audio_paths = [b["audio_path"] for b in batch]
     latent_paths = [b.get("latent_path", "") for b in batch]
-    return cond, names, audio_paths, latent_paths
+    prompt_latent_paths = [b.get("prompt_latent_path", "") for b in batch]
+    return cond, names, audio_paths, latent_paths, prompt_latent_paths
 
 
 # ==========================================
@@ -172,7 +179,6 @@ def run_inference(rank, args):
 
     dataset = DiffSVSEvalDataset(
         args.manifest_path,
-        args.singer_txt,
         max_eval=args.max_eval,
         max_duration=args.max_duration,
     )
@@ -189,10 +195,11 @@ def run_inference(rank, args):
     scales = [float(x) for x in args.scales.split("-")] if args.scales else [args.scale]
     csv_rows = []
 
-    for batch_idx, (cond, names, audio_paths, latent_paths) in enumerate(loader):
+    for batch_idx, (cond, names, audio_paths, latent_paths, prompt_latent_paths) in enumerate(loader):
         item_name = names[0]
         gt_wav_path = audio_paths[0]
         latent_path = latent_paths[0] if latent_paths[0] else None
+        prompt_latent_path = prompt_latent_paths[0] if prompt_latent_paths and prompt_latent_paths[0] else None
 
         for k, v in cond.items():
             if isinstance(v, torch.Tensor):
@@ -222,6 +229,20 @@ def run_inference(rank, args):
                 uc_cond = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in cond.items()}
                 uc_cond["spk_id"] = torch.zeros_like(cond["spk_id"])
                 uc_cond["infer"] = True
+
+                # 若提供了 prompt latent，则加载并在时间维上裁剪/补零到与 target latent 一致
+                if prompt_latent_path is not None:
+                    prompt_np = np.load(prompt_latent_path).astype(np.float32)  # [C, T_p]
+                    prompt_t = torch.from_numpy(prompt_np).unsqueeze(0).to(device)  # [1, C, T_p]
+                    _, _, T_p = prompt_t.shape
+                    if T_p > latent_length:
+                        start = (T_p - latent_length) // 2
+                        prompt_t = prompt_t[:, :, start:start + latent_length]
+                    elif T_p < latent_length:
+                        pad_len = latent_length - T_p
+                        prompt_t = F.pad(prompt_t, (0, pad_len))
+                    cond["prompt"] = prompt_t
+                    uc_cond["prompt"] = prompt_t
 
                 start_code = torch.randn(args.n_samples, latent_channels, latent_length, device=device)
 
@@ -295,20 +316,9 @@ if __name__ == "__main__":
 """
 CUDA_VISIBLE_DEVICES=7 python infer.py \
   --config configs/diff_cfm.yaml \
-  --ckpt logs/2026-03-10T06-39-42_diff_cfm/checkpoints/trainstep_checkpoints/epoch=000049-step=000040000.ckpt \
+  --ckpt logs/2026-03-16T01-04-09_diff_cfm_resume_9725/checkpoints/trainstep_checkpoints/epoch=000026-step=000060000.ckpt \
   --manifest_path data/final_test/test.tsv \
-  --singer_txt data/final_test/singer.txt \
-  --ddim_steps 100 \
-  --scale 1.0 \
-  --max_eval 25 
-
-
-CUDA_VISIBLE_DEVICES=7 python infer.py \
-  --config configs/diff_cfm_test.yaml \
-  --ckpt logs/2026-03-10T06-31-31_diff_cfm_test/checkpoints/trainstep_checkpoints/epoch=000624-step=000020000.ckpt \
-  --manifest_path data/final_test/test.tsv \
-  --singer_txt data/final_test/singer.txt \
   --ddim_steps 25 \
   --scale 1.0 \
-  --max_eval 25 
+  --max_eval 25
 """

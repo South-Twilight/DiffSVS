@@ -8,3 +8,5 @@ logs
 thirdparty
 outputs
 wandb
+
+*.tar
