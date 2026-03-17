@@ -1,0 +1,139 @@
+model:
+  base_learning_rate: 3e-06
+  target: ldm.models.diffsvs_system.DiffSVS_System
+  params:
+    # ---------- 与 TCSinger2 对齐的通用 LatentDiffusion 参数 ----------
+    linear_start: 0.00085
+    linear_end: 0.012
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    scale_by_std: true
+    use_ema: false
+    channels: 0
+    monitor: val/total_loss
+    # ---------- DiffSVS 数据 key（audio + cond 乐谱） ----------
+    first_stage_key: audio
+    cond_stage_trainable: false          # DiffSVS 在 apply_model 里自管 frontend，不交给 cond_stage
+    cond_stage_key: cond
+    cond_stage_config: __is_first_stage__
+    conditioning_key: hybrid
+    mel_dim: 128
+    # ---------- loss weights ----------
+    loss_weights:
+      cfm: 1.0        # CFM 主损失权重
+      f0_uv: 1.0      # F0/voiced-unvoiced 损失权重
+      dur: 1.0        # 时长预测损失权重
+
+    # ---------- 学习率调度：5k warmup + 10w 步线性衰减到 0.1 峰值 ----------
+    scheduler_config:
+      target: ldm.lr_scheduler.LambdaLinearScheduler
+      params:
+        warm_up_steps: [8000]
+        cycle_lengths: [200000]
+        f_start: [1.0e-06]
+        f_max: [1.0]
+        f_min: [0.05]
+    # ===================================================
+    # 2. 前台 (Frontend)：特征提取与时长预测（TCSinger2 风格）
+    # ===================================================
+    frontend_config:
+      target: utils.commons.duration.FrontendWrapper
+      params:
+        ddconfig:
+          dropout: 0.0
+          hidden_size: 256
+          dur_predictor_kernel: 3
+          dur_predictor_layers: 2
+          predictor_dropout: 0.5
+          enc_layers: 4
+          enc_ffn_kernel_size: 9
+          enc_prenet: true
+          enc_pre_ln: true
+          num_heads: 2
+        phn_vocab: 60
+        midi_vocab: 130
+        hidden_channels: 256
+    # ===================================================
+    # 3. Backbone：MMDiT 双流（concat + self-attention）
+    # ===================================================
+    unet_config:
+      target: ldm.models.diffsvs_model.DiffSVS_Backbone
+      params:
+        phn_vocab: 60
+        midi_vocab: 130
+        in_channels: 128
+        hidden_size: 768
+        num_heads: 8
+        depth: 12
+        num_speakers: 55
+        # RoPE 最大序列长度，时间维 concat(prompt,x) 后 T_total 可能达 2*latent_crop_len，需 >= 2*latent_crop_len
+        max_len: 1200
+    # ===================================================
+    # 4. 第一阶段 VAE（冻结）
+    # ===================================================
+    first_stage_config:
+      target: modules.vae.DiffRhythmVAE
+      params:
+        repo_id: "ASLP-lab/DiffRhythm-vae"
+        device: "cuda"
+    # ===================================================
+    # 5. 是否使用 Blurred Boundary Adaptor (BBC)
+    # ===================================================
+    use_bbc: false
+
+# ===================================================
+# Lightning 训练器与回调配置
+# ===================================================
+lightning:
+  callbacks:
+    image_logger:
+      target: main.AudioLogger       # 训练过程中自动生成试听音频
+      params:
+        sample_rate: 44100           # 🌟 对齐 VAE 的原始采样率
+        for_specs: false             # 纯 Latent 引擎，不再需要画 Mel 频谱图
+        increase_log_steps: false
+        batch_frequency: 5000        # 每 5000 步生成一次试听
+        max_images: 4                # 每次采样 4 首歌曲片段
+        # ⚠️ 彻底删除了 HiFi-GAN vocoder_cfg，现在 AudioLogger 将直接调用 VAE 的 decode 方法
+    # 每 1w steps 额外保存一次 ckpt（只保留最近的 2 个，在 main.TrainstepCheckpointCleanup 中控制）
+    metrics_over_trainsteps_checkpoint:
+      params: {}                     # 具体参数在 main.py 中统一配置
+            
+  trainer:
+    benchmark: True
+    gradient_clip_val: 1.0           # 极重要！防止 Transformer 早期梯度爆炸
+    replace_sampler_ddp: false       # 🌟 必须设为 false！因为我们要用自己写的动态 Sampler
+    
+  modelcheckpoint:
+    params:
+      monitor: val/total_loss        # 监控联合 Loss
+      mode: min
+      save_top_k: 1                  # 只保留 valid/loss 最好的 3 个
+      every_n_epochs: 5
+
+# ===================================================
+# DataLoader 数据配置
+# ===================================================
+data:
+  target: main.LatentDataModuleFromConfig
+  params:
+    batch_size: 128                 
+    max_tokens: 8000                # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
+    max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
+    num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
+    
+    data_dir: "data/final"           # 你的数据集路径
+    latent_channels: 128
+    latent_crop_len: 500             # 训练时随机裁剪的 Latent 最大长度
+    drop_rate: 0.1                   # CFG 无条件引导的随机 Drop 概率
+    
+    train:
+      target: ldm.dataset.diffsvs_dataset.DiffSVSTrainDataset 
+      params:
+        dataset_cfg:
+          # 其他会在内部解包的配置
+    validation:
+      target: ldm.dataset.diffsvs_dataset.DiffSVSValidationDataset
+      params:
+        dataset_cfg:
