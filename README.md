@@ -37,7 +37,7 @@ CUDA_VISIBLE_DEVICES=0,1 python main.py \
 
 CUDA_VISIBLE_DEVICES=4 python infer.py \
   --config configs/diff_cfm_test.v2.yaml \
-  --ckpt logs/2026-03-20T08-34-32_diff_cfm_test.v2/checkpoints/trainstep_checkpoints/epoch=000937-step=000060000.ckpt \
+  --ckpt exp_ckpt/2026-03-20T08-34-32_diff_cfm_test.v2/checkpoints/trainstep_checkpoints/epoch=000937-step=000060000.ckpt \
   --manifest_path data/final_test/test.tsv \
   --ddim_steps 25 \
   --scale 1.0 \

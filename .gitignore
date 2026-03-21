@@ -5,6 +5,8 @@ __pycache__/
 
 data
 logs
+exp_ckpt
+exp_outputs
 thirdparty
 outputs
 wandb

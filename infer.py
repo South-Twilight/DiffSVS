@@ -29,6 +29,9 @@ from ldm.dataset.diffsvs_dataset import (
     PITCH_PAD_ID,
 )
 
+def make_dirs(path):
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DiffSVS inference")
@@ -374,7 +377,7 @@ def run_inference(rank, args):
 
 if __name__ == "__main__":
     args = parse_args()
-    # 默认保存路径：outputs/{model}/epoch={epoch}，便于区分不同 ckpt
+    # 默认保存路径：exp_outputs/{model}/epoch={epoch}，便于区分不同 ckpt
     if not args.save_dir:
         ckpt_path = Path(args.ckpt)
         # 1) 模型目录：优先从 checkpoints 上一级目录获取 run 名
@@ -390,9 +393,11 @@ if __name__ == "__main__":
 
         # 2) ckpt 标识：仅使用 epoch/step，采样步数下沉到 scale 目录名中
         epoch_part = ckpt_path.stem  # 例如 epoch=000064 或 epoch=000049-step=000040000
-        args.save_dir = os.path.join("outputs", model_part, epoch_part)
+        args.save_dir = os.path.join("exp_outputs", model_part, epoch_part)
     else:
         args.save_dir = args.save_dir.rstrip("/")
+    
+    make_dirs(args.save_dir)
 
     if args.num_gpus > 1:
         mp.spawn(run_inference, nprocs=args.num_gpus, args=(args,))

@@ -177,7 +177,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="logs",
+        default="exp_ckpt",
         help="directory for logging dat shit",
     )
     parser.add_argument(
