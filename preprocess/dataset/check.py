@@ -209,6 +209,6 @@ if __name__ == "__main__":
     # 在这里填入你的数据集文件夹的【根目录】路径
     # 例如：ROOT_DIR = "/data/my_datasets"
     # ==========================================
-    ROOT_DIR = "/data7/tyx/DiffSVS/data/gtsinger" 
+    ROOT_DIR = "/data7/tyx/DiffSVS/data/preprocess/score_data/acesinger" 
     
     scan_dataset_directory(ROOT_DIR)

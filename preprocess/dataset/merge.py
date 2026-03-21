@@ -119,9 +119,12 @@ def merge_datasets_to_flat_list(input_dirs, output_file):
 # ==========================================
 if __name__ == "__main__":
     INPUT_DIRS = [
-        "/data7/tyx/DiffSVS/data/opencpop",
+        "/data7/tyx/DiffSVS/data/preprocess/score_data/opencpop",
+        "/data7/tyx/DiffSVS/data/preprocess/score_data/gtsinger",
+        "/data7/tyx/DiffSVS/data/preprocess/score_data/acesinger",
+        "/data7/tyx/DiffSVS/data/preprocess/score_data/m4singer",
     ]
     
-    OUTPUT_FILE = "/data7/tyx/DiffSVS/data/meta.json"
+    OUTPUT_FILE = "/data7/tyx/DiffSVS/data/preprocess/meta.json"
 
     merge_datasets_to_flat_list(INPUT_DIRS, OUTPUT_FILE)

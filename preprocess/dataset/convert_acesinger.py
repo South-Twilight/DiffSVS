@@ -2,12 +2,13 @@ import json
 import os
 import copy
 import glob
+import re
 from tqdm import tqdm
 
 def generate_acesinger_labels_flat(opencpop_json_root, acesinger_wav_root, output_dir):
     """
     基于扁平化 wav 目录结构生成 AceSinger 标注
-    wav结构: ace_{singer_id}#{uid}.wav
+    wav结构: acesinger_{singer_tag}#{uid}.wav (例如: acesinger_1crimon#2097003617.wav)
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -26,34 +27,21 @@ def generate_acesinger_labels_flat(opencpop_json_root, acesinger_wav_root, outpu
     # 2. 遍历每个音频文件
     for wav_path in tqdm(wav_files):
         try:
-            filename = os.path.basename(wav_path) # e.g., ace_2001#2097003617.wav
-            name_no_ext = os.path.splitext(filename)[0] # ace_2001#2097003617
+            filename = os.path.basename(wav_path) 
+            name_no_ext = os.path.splitext(filename)[0]
             
             # --- 解析文件名 ---
-            # 格式假设: ace_{singer_id}#{uid}
-            if "#" not in name_no_ext:
+            # 格式要求: acesinger_{singer_tag}#{uid}
+            # 使用正则精准提取
+            match = re.match(r'^acesinger_(.*?)#(\d+)$', name_no_ext)
+            if not match:
                 print(f"[Skip] Invalid filename format: {filename}")
                 continue
-                
-            parts = name_no_ext.split("#")
-            if len(parts) != 2:
-                print(f"[Skip] Unexpected format (too many #): {filename}")
-                continue
             
-            singer_part = parts[0] # ace_2001
-            uid = parts[1]         # 2097003617
+            singer_tag = match.group(1)  # e.g., '1crimon'
+            uid = match.group(2)         # e.g., '2097003617'
             
-            # 提取纯数字 ID (如果需要 acesinger_2001 这种格式，可以直接用 singer_part)
-            # 这里假设我们要构造 "acesinger_{singer_id}"
-            # 如果文件名本身就是 ace_2001，我们可以直接用 ace_2001 或者替换 ace 为 acesinger
-            # 根据您之前的需求: acesinger_{singer_id}
-            
-            if "_" in singer_part:
-                singer_id = singer_part.split("_")[-1] # 2001
-            else:
-                singer_id = singer_part # 容错
-            
-            target_singer_name = f"acesinger_{singer_id}"
+            target_singer_name = f"acesinger_{singer_tag}"
 
             # 3. 寻找对应的 Opencpop 模板
             template_path = os.path.join(opencpop_json_root, f"opencpop_{uid}.json")
@@ -70,21 +58,21 @@ def generate_acesinger_labels_flat(opencpop_json_root, acesinger_wav_root, outpu
             new_data = copy.deepcopy(template_data)
             
             # --- 修改元数据 ---
-            # Item Name: acesinger_2001#2097003617
+            # Item Name: acesinger_1crimon#2097003617
             new_data["item_name"] = f"{target_singer_name}#{uid}"
             
-            # Singer: acesinger_2001
+            # Singer: acesinger_1crimon
             new_data["singer"] = target_singer_name
             
             # Wav Fn: 绝对路径 (直接使用扫描到的路径)
             new_data["wav_fn"] = wav_path
             
-            # 清理 speech_fn
+            # 清理 speech_fn (如果模板中残留)
             if "speech_fn" in new_data:
                 del new_data["speech_fn"]
 
             # 5. 保存
-            # 输出文件名: acesinger_2001#2097003617.json
+            # 输出文件名: acesinger_1crimon#2097003617.json
             out_filename = f"{target_singer_name}#{uid}.json"
             out_path = os.path.join(output_dir, out_filename)
             
@@ -107,12 +95,12 @@ def generate_acesinger_labels_flat(opencpop_json_root, acesinger_wav_root, outpu
 # ==========================================
 if __name__ == "__main__":
     # Opencpop 完美 JSON 目录
-    OPENCPOP_JSON_DIR = "/data7/tyx/DiffSVS/data/opencpop"
+    OPENCPOP_JSON_DIR = "/data7/tyx/DiffSVS/data/preprocess/score_data/opencpop"
     
     # AceSinger 扁平化 Wav 目录
     ACESINGER_WAV_ROOT = "/data7/tyx/espnet/egs2/acesinger/svs1/wav_dump"
     
     # 输出目录
-    OUTPUT_DIR = "/data7/tyx/DiffSVS/data/acesinger"
+    OUTPUT_DIR = "/data7/tyx/DiffSVS/data/preprocess/score_data/acesinger"
 
     generate_acesinger_labels_flat(OPENCPOP_JSON_DIR, ACESINGER_WAV_ROOT, OUTPUT_DIR)

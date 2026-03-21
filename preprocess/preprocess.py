@@ -65,9 +65,9 @@ def generate(input_file, output_file, latent_path):
         mel_value = normalize_path(mel_value)
         
         # 🌟 2. 新增：检查 mel_path 是否存在
-        if not os.path.exists(mel_value):
-            missing_mel_files.append(mel_value)
-            continue
+        # if not os.path.exists(mel_value):
+        #     missing_mel_files.append(mel_value)
+        #     continue
         
         # 只有在 audio 和 mel 都存在的情况下，才加入到 manifest 中
         for key in all_keys:

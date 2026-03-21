@@ -179,7 +179,7 @@ def process_audio_by_tsv(rank, args):
     total_skipped = len(local_skipped_records)
     if total_skipped > 0:
         # 获取 tsv_path 所在的目录，将日志存放在那里
-        log_dir = os.path.dirname(os.path.abspath(args.tsv_path))
+        log_dir = os.path.dirname("./data/feat_extract")
         log_file = os.path.join(log_dir, "log", f"skipped_files_gpu{rank}.txt")
         
         with open(log_file, "w", encoding="utf-8") as f:
