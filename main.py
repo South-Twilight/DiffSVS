@@ -972,12 +972,12 @@ if __name__ == "__main__":
                 raise
         elif opt.val:
             trainer.validate(model, data)
-        if not opt.no_test and not trainer.interrupted:
-            if not opt.train and hasattr(opt,'ckpt_path'):# just test the ckeckpoint, without training
-                trainer.test(model, data, ckpt_path = opt.ckpt_path)
-            else:# test the model after trainning
-                trainer.test(model, data)               
-    except Exception:
+    #     if not opt.no_test and not trainer.interrupted:
+    #         if not opt.train and hasattr(opt,'ckpt_path'):# just test the ckeckpoint, without training
+    #             trainer.test(model, data, ckpt_path = opt.ckpt_path)
+    #         else:# test the model after trainning
+    #             trainer.test(model, data)               
+    # except Exception:
         if opt.debug and trainer.global_rank == 0:
             try:
                 import pudb as debugger

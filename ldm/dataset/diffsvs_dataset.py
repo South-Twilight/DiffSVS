@@ -363,104 +363,206 @@ class DiffSVSTestDataset(DiffSVSDataset):
         super().__init__('test', **dataset_cfg)
 
 
-class DDPIndexBatchSampler(Sampler):    # 让长度相似的音频的indices合到一个batch中以避免过长的pad
-    def __init__(self, indices, batch_size, num_replicas: Optional[int] = None,
-                 rank: Optional[int] = None, shuffle: bool = True,
-                 seed: int = 0, drop_last: bool = False,
-                 max_tokens: Optional[int] = None, max_sentences: Optional[int] = None,
-                 lengths: Optional[List[int]] = None) -> None:
-        
+class DDPIndexBatchSampler(Sampler):
+    """
+    让长度相近的样本组成 batch，并在 DDP 下按 rank 切分。
+
+    与传统 `sum(lengths) <= max_tokens` 不同，
+    这里使用更接近真实显存占用的估计：
+
+        estimated_cost = max_len_in_batch * batch_size
+
+    因为 collate 后通常会 pad 到 batch 内最长长度，
+    所以真实显存更接近 `B * T_max`，而不是 `sum(T_i)`。
+
+    参数:
+        indices: 已经按长度排序好的样本下标列表
+        batch_size: fallback 用；如果 max_tokens=None，则按固定 batch_size 组 batch
+        num_replicas: DDP world size
+        rank: 当前 rank
+        shuffle: 是否每个 epoch 打乱 batch 顺序
+        seed: shuffle seed
+        drop_last: 是否丢弃最后不完整 batch
+        max_tokens: 这里表示“估计后的 batch 体积上限”，即 B * T_max 上限
+        max_sentences: 单 batch 最大样本数上限
+        lengths: 每个样本的长度估计列表
+    """
+
+    def __init__(
+        self,
+        indices,
+        batch_size,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0,
+        drop_last: bool = False,
+        max_tokens: Optional[int] = None,
+        max_sentences: Optional[int] = None,
+        lengths: Optional[List[int]] = None,
+    ) -> None:
+        super().__init__(None)
+
         if num_replicas is None:
             if not dist.is_initialized():
-                # raise RuntimeError("Requires distributed package to be available")
                 logger.info("Not in distributed mode")
                 num_replicas = 1
             else:
                 num_replicas = dist.get_world_size()
+
         if rank is None:
             if not dist.is_initialized():
-                # raise RuntimeError("Requires distributed package to be available")
                 rank = 0
             else:
                 rank = dist.get_rank()
-        if rank >= num_replicas or rank < 0:
-            raise ValueError(
-                "Invalid rank {}, rank should be in the interval"
-                " [0, {}]".format(rank, num_replicas - 1))
-        self.indices = indices
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.epoch = 0
-        self.drop_last = drop_last
-        self.batch_size = batch_size
+
+        self.indices = list(indices)
+        self.batch_size = int(batch_size)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
         self.shuffle = shuffle
-        self.seed = seed
-        self.max_tokens = int(max_tokens) if max_tokens is not None else None
-        self.max_sentences = int(max_sentences) if max_sentences is not None else None
+        self.seed = int(seed)
+        self.drop_last = drop_last
+
+        self.max_tokens = max_tokens if max_tokens is not None else None
+        self.max_sentences = max_sentences if max_sentences is not None else batch_size
         self.lengths = lengths
 
-        # 保留完整 batch 列表，用于 set_epoch 时重新 shuffle + 分区
+        self.epoch = 0
         self._full_batches = self.build_batches()
-        logger.info("rank: %s, total batches_num %s", self.rank, len(self._full_batches))
+
+        logger.info(
+            "[DDPIndexBatchSampler] rank=%s num_replicas=%s total_full_batches=%s "
+            "batch_size=%s max_tokens=%s max_sentences=%s",
+            self.rank,
+            self.num_replicas,
+            len(self._full_batches),
+            self.batch_size,
+            self.max_tokens,
+            self.max_sentences,
+        )
+
         if self.drop_last and len(self._full_batches) % self.num_replicas != 0:
-            self._full_batches = self._full_batches[:len(self._full_batches)//self.num_replicas*self.num_replicas]
+            keep = (len(self._full_batches) // self.num_replicas) * self.num_replicas
+            self._full_batches = self._full_batches[:keep]
+
         self._update_batches_for_epoch()
-        logger.info("after split batches_num %s", len(self.batches))
+
+        logger.info(
+            "[DDPIndexBatchSampler] rank=%s local_batches=%s",
+            self.rank,
+            len(self.batches),
+        )
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._update_batches_for_epoch()
+
+    def __iter__(self) -> Iterator[List[int]]:
+        yield from self.batches
+
+    def __len__(self) -> int:
+        return len(self.batches)
 
     def _update_batches_for_epoch(self):
-        """对完整 batch 列表 shuffle 后按 rank 分区，保证每 epoch 各卡拿到不同数据"""
+        """
+        对完整 batch 列表 shuffle 后，再按 rank 切分。
+        """
         full = list(self._full_batches)
+
         if self.shuffle:
-            np.random.seed(self.seed + self.epoch)
-            idx = np.random.permutation(len(full))
-            full = [full[i] for i in idx]
+            rng = np.random.RandomState(self.seed + self.epoch)
+            perm = rng.permutation(len(full))
+            full = [full[i] for i in perm]
+
+        if len(full) == 0:
+            self.batches = []
+            return
+
+        # 按 batch 维度进行 DDP 切分：rank r 取 full[r::num_replicas]
         if len(full) > self.num_replicas:
             self.batches = full[self.rank::self.num_replicas]
         else:
-            self.batches = [full[0]] if full else []
-
-    def set_epoch(self, epoch):
-        self.epoch = epoch
-        self._update_batches_for_epoch()
+            # batch 数少于卡数时，尽量不报错
+            self.batches = full[self.rank:self.rank + 1] if self.rank < len(full) else []
 
     def build_batches(self):
-        # 1) max_tokens 模式：按 latent 帧长累计到阈值切 batch
+        """
+        构造“完整 batch 列表”（未按 rank 切分）。
+
+        关键改动：
+        不再按 sum(lengths) 限制，
+        改为按：
+            max_len_in_batch * batch_size <= max_tokens
+        来限制 batch 体积。
+        """
+        # 1) 动态 batch 模式：使用 max_tokens + lengths
         if self.max_tokens is not None and self.lengths is not None:
-            batches: List[List[int]] = []
-            batch: List[int] = []
-            tok = 0
+            batches = []
+            batch = []
+            cur_max_len = 0
+
             max_sent = self.max_sentences if self.max_sentences is not None else self.batch_size
+            max_sent = max(1, int(max_sent))
 
             for index in self.indices:
-                t = int(self.lengths[index]) if index < len(self.lengths) else 1
-                t = max(t, 1)
-                # 如果加入当前样本会超 token 或超句子数，则先封包当前 batch
-                if len(batch) > 0 and ((tok + t) > self.max_tokens or (len(batch) >= max_sent)):
+                t = self._safe_length(index)
+
+                new_bs = len(batch) + 1
+                new_max_len = max(cur_max_len, t)
+                estimated_cost = new_bs * new_max_len  # 核心：近似 pad 后体积
+
+                # 如果当前 batch 非空，且加入新样本后超限，则先封包
+                if len(batch) > 0 and (
+                    estimated_cost > self.max_tokens or len(batch) >= max_sent
+                ):
                     batches.append(batch)
-                    batch = []
-                    tok = 0
-                # 单样本就超过 max_tokens：也要单独成 batch，避免死循环
-                batch.append(index)
-                tok += t
+                    batch = [index]
+                    cur_max_len = t
+                else:
+                    batch.append(index)
+                    cur_max_len = new_max_len
 
             if len(batch) > 0 and not self.drop_last:
                 batches.append(batch)
+            elif len(batch) > 0 and self.drop_last:
+                # drop_last=True 时，只有达到条件的完整 batch 才保留
+                # 这里最后残余 batch 丢弃
+                pass
+
             return batches
 
-        # 2) 退化：按固定 batch_size 切 batch
-        batches, batch = [], []
+        # 2) fallback：固定 batch_size
+        batches = []
+        batch = []
         for index in self.indices:
             batch.append(index)
             if len(batch) == self.batch_size:
                 batches.append(batch)
                 batch = []
-        if not self.drop_last and len(batch) > 0:
+
+        if len(batch) > 0 and not self.drop_last:
             batches.append(batch)
+
         return batches
 
-    def __iter__(self) -> Iterator[List[int]]:
-        for batch in self.batches:
-            yield batch
+    def _safe_length(self, index: int) -> int:
+        """
+        安全读取长度，保证 >= 1
+        """
+        if self.lengths is None:
+            return 1
 
-    def __len__(self) -> int:
-        return len(self.batches)
+        if index < 0 or index >= len(self.lengths):
+            return 1
+
+        t = self.lengths[index]
+        if t is None:
+            return 1
+
+        try:
+            t = int(t)
+        except Exception:
+            return 1
+
+        return max(t, 1)
