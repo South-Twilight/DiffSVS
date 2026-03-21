@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from typing import Optional
 from einops import rearrange
 
+from ldm.dataset.diffsvs_dataset import PHN_PAD_ID, PITCH_PAD_ID
+
 from ldm.modules.diffusionmodules.flag_large_dit_moe import (
     Attention,
     RMSNorm,
@@ -117,12 +119,6 @@ class FinalLayer(nn.Module):
 
 
 class DiffSVS_Backbone(nn.Module):
-    """
-    纯手写版（不继承 Singer）的 TCSinger2 风格主干：
-    - 输入：x 为 VAE latent，[B, C_latent, T]
-    - 条件只用：phn + midi + spk_id (+ f0_gt)
-    - 主干：AdaLN DiT (Attention + ConvMLP)，带 F0 分支
-    """
 
     def __init__(
         self,
@@ -139,8 +135,8 @@ class DiffSVS_Backbone(nn.Module):
         rope_scaling_factor: float = 1.0,
         ntk_factor: float = 1.0,
         num_speakers: int = 100,
-        phn_vocab: int = 476,
-        midi_vocab: int = 100,
+        phn_vocab: int = 60,
+        midi_vocab: int = 130,
         loss_weights: dict = {
             "cfm": 1.0,
             "f0_uv": 1.0,
@@ -174,10 +170,14 @@ class DiffSVS_Backbone(nn.Module):
             nn.Conv1d(hidden_size, hidden_size, kernel_size=kernel_size, padding=kernel_size // 2),
             nn.LeakyReLU(),
         )
+        self.prompt_proj = nn.Conv1d(
+            in_channels, hidden_size, kernel_size=kernel_size, padding=kernel_size // 2
+        )
+        self.content_proj = nn.Conv1d(hidden_size, hidden_size, kernel_size=1)
 
-        # 将投影后的 audio 序列与 content 在特征维 concat 后线性融合
-        self.content_merge = nn.Linear(hidden_size * 2, hidden_size, bias=True)
-        self.gate_f0 = nn.Linear(hidden_size, hidden_size, bias=True)
+        # TCSinger2 风格：Gated Add 融合（不使用 concat + linear）
+        self.gate_content = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.gate_f0 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
 
         # F0 分支
         self.f0_proj = nn.Sequential(
@@ -224,18 +224,33 @@ class DiffSVS_Backbone(nn.Module):
 
     def forward(self, x, t, context):
         """
-        context 期望结构：
-        context['c_concat'] = {
-            'phn':    [B, T_lat] 或 [B, 1, T_lat],
-            'midi':  [B, T_lat] 或 [B, 1, T_lat],
-            'f0_gt': [B, 1, T_audio]（训练时）,
-            'spk_id': [B],
-            'prompt': [B, C_latent, T_lat]（可选，prompt latent，与 x 在时间维对齐）
-        }
-        context['infer']: bool
+        Args:
+            x: noisy target latent，形状 [B, C_latent, T_lat]。
+            t: diffusion timestep，形状 [B]。
+            context: 字典，期望结构：
+                context['c_concat'] = {
+                    'phn':    [B, T_lat] 或 [B, 1, T_lat],
+                    'midi':   [B, T_lat] 或 [B, 1, T_lat],
+                    'f0_gt':  [B, 1, T_lat]（训练时，可选）,
+                    'spk_id': [B],  # 当前 forward 不显式使用，但保留字段
+                    'prompt': [B, C_latent, T_p]（可选，prompt latent，音色参考片段）
+                }
+                context['infer']: bool，推理模式标志。
 
-        输入在时间维 concat：x_in = [prompt, x]，即 (prompt_latent, noisy_target_latent)。
-        content / f0 仅对齐 target 长度，前 T_p 帧用零 pad；最终 flow 只取序列后 T_lat 帧。
+        主要流程：
+            1. 使用 Conv1d 分别处理 prompt 和 target latent：
+               - prompt -> prompt_proj -> [B, T_p, H]
+               - x      -> proj_in      -> [B, T_lat, H]
+               在时间维拼接为 x_full = [prompt_feat, x_proj]，形状 [B, T_p + T_lat, H]。
+            2. 使用 PHN_PAD_ID / PITCH_PAD_ID 在 ID 级别对 phn/midi pad 到全长，
+               再各自经过 embedding+proj，最后相加得到 content（[B, T_p + T_lat, H]），不再用物理零点 F.pad。
+            3. 使用 TCSinger2 风格的 Gated Add 将 content 注入到 x_full 中（不使用 concat + linear）。
+               仅取 pre_transformer 输出的 target 段 feats_target = x[:, T_p:, :] 做 F0 / UV 预测，
+               避免 prompt 污染 F0/UV 回归器的感受野。
+            4. AdaLN 条件 adaln_input = t_embed + prompt_global：
+               - t_embed: 时间嵌入 [B, H]
+               - prompt_global: prompt_feat 在时间维平均得到的全局音色向量 [B, H]（无 prompt 时为 0）
+               该条件用于 pre_transformer、后续所有 TransformerBlock 以及 FinalLayer。
         """
         assert isinstance(context, dict)
         acoustic = context["c_concat"]
@@ -244,21 +259,14 @@ class DiffSVS_Backbone(nn.Module):
         phn = acoustic["phn"]
         midi = acoustic["midi"]
         f0_gt = acoustic.get("f0_gt", None)
-        y_spk = acoustic["spk_id"]
+        # spk_id 仍然保留在数据流中（方便将来扩展），但本 forward 不显式使用
+        # y_spk = acoustic["spk_id"]
         prompt = acoustic.get("prompt", None)
 
         B, _, T_lat = x.shape
         device = x.device
-
-        # 时间维 concat：x_in = [prompt, x] -> [B, C, T_p + T_lat]
-        if prompt is not None:
-            T_p = prompt.shape[2]
-            x_in = torch.cat([prompt, x], dim=2)
-        else:
-            T_p = 0
-            x_in = x
-
-        T_total = x_in.shape[2]
+        T_p = prompt.shape[2] if prompt is not None else 0
+        T_total = T_p + T_lat
 
         # phn / midi 处理（仅对 target 长度 T_lat）
         if phn.dim() == 3:
@@ -270,25 +278,48 @@ class DiffSVS_Backbone(nn.Module):
         else:
             midi_ids = midi
 
-        phn_feat = self.phn_proj(self.phn_embedding(phn_ids).transpose(1, 2)).transpose(1, 2)
-        midi_feat = self.midi_proj(self.midi_embedding(midi_ids).transpose(1, 2)).transpose(1, 2)
-        content = phn_feat + midi_feat                     # [B, T_lat, H]
-        # content 左 pad 到全长，前 T_p 帧无乐谱, 与Prompt对应
-        content_padded = F.pad(content, (0, 0, T_p, 0))   # [B, T_total, H]
+        # 1) phn / midi 特征（target 段）
+        phn_feat = self.phn_proj(self.phn_embedding(phn_ids).transpose(1, 2)).transpose(1, 2)   # [B, T_lat, H]
+        midi_feat = self.midi_proj(self.midi_embedding(midi_ids).transpose(1, 2)).transpose(1, 2)  # [B, T_lat, H]
 
-        # 整段投影后与 content 融合
-        x_proj = self.proj_in(x_in).transpose(1, 2)       # [B, T_total, H]
-        x = self.content_merge(torch.cat([x_proj, content_padded], dim=-1))  # [B, T_total, H]
-
-        # AdaLN 条件：时间 + prompt 全局信息（在时间维上做平均）
-        t_emb = self.t_embedder(t)                        # [B, H]
-        if prompt is not None and T_p > 0:
-            # 取 x_proj 中对应 prompt 段的特征 [B, T_p, H]，在时间维上平均
-            prompt_feat = x_proj[:, :T_p, :]              # [B, T_p, H]
-            prompt_global = prompt_feat.mean(dim=1)       # [B, H]
+        # 2) prompt 段的 content 占位（使用 PAD ID 通过 embedding / proj）
+        if T_p > 0:
+            phn_pad_ids = torch.full(
+                (B, T_p), PHN_PAD_ID, dtype=phn_ids.dtype, device=device
+            )
+            midi_pad_ids = torch.full(
+                (B, T_p), PITCH_PAD_ID, dtype=midi_ids.dtype, device=device
+            )
+            phn_pad_feat = self.phn_proj(self.phn_embedding(phn_pad_ids).transpose(1, 2)).transpose(1, 2)
+            midi_pad_feat = self.midi_proj(self.midi_embedding(midi_pad_ids).transpose(1, 2)).transpose(1, 2)
+            phn_full = torch.cat([phn_pad_feat, phn_feat], dim=1)
+            midi_full = torch.cat([midi_pad_feat, midi_feat], dim=1)
+            content = phn_full + midi_full  # [B, T_total, H]
         else:
-            prompt_global = torch.zeros_like(t_emb)       # 无 prompt 时不注入额外条件
-        adaln_input = t_emb + prompt_global               # [B, H]
+            content = phn_feat + midi_feat  # [B, T_lat, H]
+
+        content= self.content_proj(content.transpose(1, 2)).transpose(1, 2)  # [B, T_total, H]
+
+        # 3) audio latent 投影 + prompt 局部特征 + 拼接
+        #    - target 段：x -> proj_in -> [B, T_lat, H]
+        #    - prompt 段：prompt -> prompt_proj -> [B, T_p, H]
+        x_proj = self.proj_in(x).transpose(1, 2)  # [B, T_lat, H]
+        if prompt is not None and T_p > 0:
+            prompt_feat = self.prompt_proj(prompt).transpose(1, 2)  # [B, T_p, H]
+            x_full = torch.cat([prompt_feat, x_proj], dim=1)        # [B, T_total, H]
+            prompt_global = prompt_feat.mean(dim=1)                 # [B, H]
+        else:
+            x_full = x_proj                                         # [B, T_lat, H]
+            prompt_global = torch.zeros(B, self.hidden_size, device=device, dtype=x_proj.dtype)
+
+        # 4) 仅使用时间嵌入 + prompt 全局特征作为 AdaLN 条件（不显式使用 spk 信息）
+        t_emb = self.t_embedder(t)                                  # [B, H]
+        adaln_input = t_emb + prompt_global                         # [B, H]
+
+        # 5) audio + content 融合（Gated Add；对齐 TCSinger2 无 Caption）
+        x = x_full
+        gate_content = torch.sigmoid(self.gate_content(content))  # [B, T_total, H]
+        x = x + content * gate_content
 
         mask = torch.ones((B, x.size(1)), dtype=torch.int32, device=device)
         y_mask = mask.bool()
@@ -297,39 +328,46 @@ class DiffSVS_Backbone(nn.Module):
         # pre_transformer：纯 self-attention（y=x，y_mask 使用 bool 类型）
         x, _ = self.pre_transformer(x, mask, x, y_mask, freqs_cis, adaln_input=adaln_input)
 
-        feats = x
-        f0_pred_lat = self.f0_regressor(feats).transpose(1, 2)
-        f0_pred = self.f0_upsample(f0_pred_lat)
-        uv_logits_lat = self.uv_classifier(feats)
+        # 仅使用 target 段特征进行 F0 / UV 预测，避免 prompt 污染
+        feats_target = x[:, T_p:, :]  # [B, T_lat, H]
+        f0_pred_lat = self.f0_regressor(feats_target).transpose(1, 2)  # [B, 1, T_lat/down]
+        f0_pred = self.f0_upsample(f0_pred_lat)                        # [B, 1, T_lat]
+        uv_logits_lat = self.uv_classifier(feats_target)               # [B, T_lat, 2]
         uv_pred_lat = torch.argmax(uv_logits_lat, dim=-1, keepdim=True).float().permute(0, 2, 1)
-
-        # 只对 target 段（后 T_lat 帧）算 loss 和 f0 条件
-        f0_pred_target = f0_pred[:, :, T_p:]
-        uv_logits_target = uv_logits_lat[:, T_p:, :]
 
         f0_loss = uv_loss = torch.tensor(0.0, device=device, dtype=x.dtype)
         if infer:
-            uv_pred_orig = uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, T_p:][:, :, : f0_pred_target.shape[-1]]
-            f0_for_cond = f0_pred_target.detach() * uv_pred_orig
+            uv_pred_orig = uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, : f0_pred.shape[-1]]
+            f0_for_cond = f0_pred.detach() * uv_pred_orig
         else:
             if f0_gt is not None:
-                f0_gt_safe = f0_gt.clamp(min=0.0)
+                f0_gt_safe = f0_gt.clamp(min=0.0, max=1500.0)
                 f0_gt_log = torch.log(f0_gt_safe + 1.0)
                 uv_mask = (f0_gt_safe > 0).float()
-                f0_loss = F.mse_loss(f0_pred_target * uv_mask, f0_gt_log * uv_mask)
+                f0_loss = F.smooth_l1_loss(f0_pred * uv_mask, f0_gt_log * uv_mask)
                 uv_gt = (f0_gt_safe.squeeze(1) > 0).long()
-                uv_loss = F.cross_entropy(uv_logits_target.reshape(-1, 2), uv_gt.reshape(-1))
+                uv_loss = F.cross_entropy(uv_logits_lat.reshape(-1, 2), uv_gt.reshape(-1))
                 f0_for_cond = f0_gt_log
             else:
-                uv_pred_orig = uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, T_p:][:, :, : f0_pred_target.shape[-1]]
-                f0_for_cond = f0_pred_target * uv_pred_orig
-            f0_pred_target = f0_pred_target * uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, T_p:][:, :, : f0_pred_target.shape[-1]]
+                uv_pred_orig = uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, : f0_pred.shape[-1]]
+                f0_for_cond = f0_pred * uv_pred_orig
+            f0_pred = f0_pred * uv_pred_lat.repeat_interleave(self.downsample_rate, dim=2)[:, :, : f0_pred.shape[-1]]
 
-        # f0 条件对齐全长：前 T_p 帧填 0，再送 f0_proj
-        f0_for_cond_full = F.pad(f0_for_cond, (T_p, 0)) if T_p > 0 else f0_for_cond
-        f0_feat = self.f0_proj(f0_for_cond_full).transpose(1, 2)
-        gate_f0 = torch.sigmoid(self.gate_f0(f0_feat))
-        x = x + f0_feat * gate_f0
+        # f0 注入（对齐 TCSinger2）：prompt 段与 target 段分别过 f0_proj，再在 feature 维拼接后 gated-add
+        f0_feat = self.f0_proj(f0_for_cond).transpose(1, 2)  # [B, T_lat, H]
+        if T_p > 0:
+            f0_pad = torch.zeros(
+                (B, 1, T_p * self.downsample_rate),
+                device=device,
+                dtype=f0_for_cond.dtype,
+            )
+            f0_pad_feat = self.f0_proj(f0_pad).transpose(1, 2)  # [B, T_p, H]
+            f0_full = torch.cat([f0_pad_feat, f0_feat], dim=1)   # [B, T_total, H]
+        else:
+            f0_full = f0_feat  # [B, T_lat, H]
+
+        gate_f0 = torch.sigmoid(self.gate_f0(f0_full))
+        x = x + f0_full * gate_f0
 
         for block in self.blocks:
             # 纯 self-attention：y=x，无 MoE 辅助 loss
