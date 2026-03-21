@@ -11,22 +11,36 @@ data directory: `./data/final`
 
 ```python
 
-CUDA_VISIBLE_DEVICES=4 python main.py --base configs/diff_cfm_test.yaml -t --gpus 1
+CUDA_VISIBLE_DEVICES=4 python main.py --base configs/diff_cfm_test.v2.yaml -t --gpus 1
 
-CUDA_VISIBLE_DEVICES=4 python main.py \
-  --base configs/diff_cfm.yaml  -t \
+CUDA_VISIBLE_DEVICES=3 python main.py \
+  --base configs/diff_cfm.v1.yaml  -t \
   --gpus 1
 
-CUDA_VISIBLE_DEVICES=4 python main.py \
-  --base configs/diff_cfm.yaml \
+CUDA_VISIBLE_DEVICES=4,5,6,7 python main.py \
+  --base configs/diff_cfm.v1.yaml \
   -t \
-  --gpus 1 \
-  --resume logs/2026-03-15T12-10-16_diff_cfm/checkpoints/epoch=000004-step=000009725.ckpt
+  --gpus 4 \
+  --resume logs/2026-03-18T07-44-19_resume_2026-03-17T16-24-33_diff_cfm.v1_33550 \
+  --name resume_2026-03-17T16-24-33_diff_cfm.v1_33550
 
-CUDA_VISIBLE_DEVICES=4 python main.py \
-  --base configs/diff_cfm.yaml \
+CUDA_VISIBLE_DEVICES=0,1 python main.py \
+  --base configs/diff_cfm.v2.yaml \
   -t \
-  --gpus 1 \
-  --resume logs/2026-03-15T12-10-16_diff_cfm/checkpoints/epoch=000004-step=000009725.ckpt \
-  --name diff_cfm_resume_9725
+  --gpus 2 
+```
+
+
+## Infer DiffSVS
+
+```python
+
+CUDA_VISIBLE_DEVICES=4 python infer.py \
+  --config configs/diff_cfm_test.v2.yaml \
+  --ckpt logs/2026-03-20T08-34-32_diff_cfm_test.v2/checkpoints/trainstep_checkpoints/epoch=000937-step=000060000.ckpt \
+  --manifest_path data/final_test/test.tsv \
+  --ddim_steps 25 \
+  --scale 1.0 \
+  --max_eval 25
+
 ```

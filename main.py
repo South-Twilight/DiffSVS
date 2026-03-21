@@ -185,7 +185,7 @@ def get_parser(**parser_kwargs):
         type=str2bool,
         nargs="?",
         const=True,
-        default=True,
+        default=False,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
     parser.add_argument(
@@ -681,12 +681,6 @@ if __name__ == "__main__":
     parser = Trainer.add_argparse_args(parser)
 
     opt, unknown = parser.parse_known_args()
-    if opt.name and opt.resume:
-        raise ValueError(
-            "-n/--name and -r/--resume cannot be specified both."
-            "If you want to resume training in a new log folder, "
-            "use -n/--name in combination with --resume_from_checkpoint"
-        )
     if opt.resume:
         if not os.path.exists(opt.resume):
             raise ValueError("Cannot find {}".format(opt.resume))
@@ -702,8 +696,13 @@ if __name__ == "__main__":
         opt.ckpt_path = ckpt
         base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
         opt.base = base_configs + opt.base
-        _tmp = logdir.split("/")
-        nowname = _tmp[-1]
+        # 允许在 resume 的同时指定一个新的运行名（用于新 logdir + 新 wandb run）
+        if opt.name:
+            name = "_" + opt.name
+        else:
+            name = "_resume"
+        nowname = now + name + opt.postfix
+        logdir = os.path.join(opt.logdir, nowname)
     else:
         if opt.name:
             name = "_" + opt.name
@@ -783,10 +782,10 @@ if __name__ == "__main__":
             "target": "pytorch_lightning.callbacks.ModelCheckpoint",
             "params": {
                 "dirpath": ckptdir,
-                "filename": "{epoch:06}",
+                "filename": "{epoch:06}-{step:09}",
                 "verbose": True,
                 "save_last": True,   # 始终保留最新 last.ckpt
-                "save_top_k": 3,     # 根据 val/loss 只保留最优的 3 个
+                "save_top_k": 1,     # 只保留一个全局最优（按 val/loss）
             }
         }
         # use valitdation monitor:
@@ -862,7 +861,7 @@ if __name__ == "__main__":
                          "filename": "{epoch:06}-{step:09}",
                          "verbose": True,
                          'save_top_k': -1,
-                         'every_n_train_steps': 10000,
+                         'every_n_train_steps': 5000,
                          'save_weights_only': True
                      }
                     }
@@ -874,8 +873,8 @@ if __name__ == "__main__":
                      'params': {
                          "ckptdir": ckptdir,
                          "subdir": "trainstep_checkpoints",
-                         "keep_last": 2,        # 每 1w steps 一个 ckpt，但最多保留 2 个
-                         "every_n_steps": 10000
+                         "keep_last": 1,        # 每 5k steps 一个 ckpt，但最多保留最新 1 个
+                         "every_n_steps": 5000
                      }
                     }
             }
@@ -952,6 +951,15 @@ if __name__ == "__main__":
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
         logging.info("#####  trainer.logdir: %s  #####", trainer.logdir)
+        # 显式打印 resume 的 epoch/global_step，保证写入 train.log（Lightning 的 restore 日志可能不走 root logger）
+        if opt.train and hasattr(opt, "ckpt_path") and isinstance(opt.ckpt_path, str) and os.path.isfile(opt.ckpt_path):
+            try:
+                ckpt_meta = torch.load(opt.ckpt_path, map_location="cpu", weights_only=False)
+                ckpt_epoch = ckpt_meta.get("epoch", None) if isinstance(ckpt_meta, dict) else None
+                ckpt_gs = ckpt_meta.get("global_step", None) if isinstance(ckpt_meta, dict) else None
+                logging.info("Resuming from ckpt: %s (epoch=%s, global_step=%s)", opt.ckpt_path, ckpt_epoch, ckpt_gs)
+            except Exception as e:
+                logging.info("Resuming from ckpt: %s (failed to read meta: %s)", opt.ckpt_path, e)
         # run
         if opt.train:
             try:

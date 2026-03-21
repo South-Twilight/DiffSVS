@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 3e-06
+  base_learning_rate: 3e-04
   target: ldm.models.diffsvs_system.DiffSVS_System
   params:
     # ---------- 与 TCSinger2 对齐的通用 LatentDiffusion 参数 ----------
@@ -29,8 +29,8 @@ model:
     scheduler_config:
       target: ldm.lr_scheduler.LambdaLinearScheduler
       params:
-        warm_up_steps: [8000]
-        cycle_lengths: [200000]
+        warm_up_steps: [10000]
+        cycle_lengths: [180000]
         f_start: [1.0e-06]
         f_max: [1.0]
         f_min: [0.05]
@@ -52,7 +52,7 @@ model:
           enc_pre_ln: true
           num_heads: 2
         phn_vocab: 60
-        midi_vocab: 129
+        midi_vocab: 130
         hidden_channels: 256
     # ===================================================
     # 3. Backbone：MMDiT 双流（concat + self-attention）
@@ -61,7 +61,7 @@ model:
       target: ldm.models.diffsvs_model.DiffSVS_Backbone
       params:
         phn_vocab: 60
-        midi_vocab: 129
+        midi_vocab: 130
         in_channels: 128
         hidden_size: 768
         num_heads: 8
@@ -109,7 +109,7 @@ lightning:
     params:
       monitor: val/total_loss        # 监控联合 Loss
       mode: min
-      save_top_k: 3                  # 只保留 valid/loss 最好的 3 个
+      save_top_k: 1                  # 只保留 valid/loss 最好的 3 个
       every_n_epochs: 5
 
 # ===================================================
@@ -118,7 +118,7 @@ lightning:
 data:
   target: main.LatentDataModuleFromConfig
   params:
-    batch_size: 128                 
+    batch_size: 64                 
     max_tokens: 6000                # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
     max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
     num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
