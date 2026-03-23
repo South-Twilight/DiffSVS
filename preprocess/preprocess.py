@@ -99,7 +99,7 @@ def generate(input_file, output_file, latent_path):
     save_df_to_tsv(pd.DataFrame.from_dict(manifest), output_file)
 
 if __name__ == '__main__':
-    input_file = '/data7/tyx/DiffSVS/data/preprocess/meta.json'
-    output_file = '/data7/tyx/DiffSVS/data/preprocess/data.tsv'
-    latent_path = '/data7/tyx/DiffSVS/data/feat_extract/latent'
+    input_file = './data/preprocess/meta.json'
+    output_file = './data/preprocess/data.tsv'
+    latent_path = './data/feat_extract/latent'
     generate(input_file, output_file, latent_path)

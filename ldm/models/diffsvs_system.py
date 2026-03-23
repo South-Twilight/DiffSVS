@@ -4,16 +4,19 @@ import torch.nn.functional as F
 import logging
 from ldm.models.diffusion.cfm1_audio import CFM
 from ldm.util import instantiate_from_config
-from ldm.dataset.diffsvs_dataset import PHN_PAD_ID
+from ldm.dataset.diffsvs_dataset import PHN_PAD_ID, PITCH_PAD_ID
 
 class LengthRegulator(nn.Module):
     """根据 duration 将 Token 级别的特征扩展到 Frame 级别"""
-    def forward(self, x, dur):
+
+    def forward(self, x: torch.Tensor, dur: torch.Tensor, *, padding_value: int = 0) -> torch.Tensor:
         out = []
         for i in range(x.size(0)):
             expanded = torch.repeat_interleave(x[i], dur[i], dim=0)
             out.append(expanded)
-        return torch.nn.utils.rnn.pad_sequence(out, batch_first=True)
+        return torch.nn.utils.rnn.pad_sequence(
+            out, batch_first=True, padding_value=int(padding_value)
+        )
 
 class BlurredBoundaryAdaptor(nn.Module):
     """适配 f=2048 极端压缩的 BBC 边界平滑器"""
@@ -51,6 +54,7 @@ class DiffSVS_System(CFM):
     def __init__(self, use_bbc=False, **kwargs):
         frontend_config = kwargs.pop("frontend_config", None)
         loss_weights = kwargs.pop("loss_weights", {})
+        self.sampling_cfg = kwargs.pop("sampling_config", {})
         # 各损失项权重：默认都为 1.0，可在 YAML 中通过 model.params.loss_weights 配置
         self.loss_w_cfm = float(loss_weights.get("cfm", 1.0))
         if self.loss_w_cfm > 0.01:
@@ -188,8 +192,8 @@ class DiffSVS_System(CFM):
             # 送入 LengthRegulator 的 dur 至少为 1，避免 repeat_interleave(..., 0) 产生空序列
             dur = cond["dur_gt"].long().clamp(min=1)
 
-        phn = self.length_regulator(phn, dur)
-        midi = self.length_regulator(midi, dur)
+        phn = self.length_regulator(phn, dur, padding_value=int(PHN_PAD_ID))
+        midi = self.length_regulator(midi, dur, padding_value=int(PITCH_PAD_ID))
         if self.use_bbc:
             phn = self.bbc_adaptor(phn, dur, is_training=not infer)
         # 与 audio 帧对齐
@@ -197,12 +201,12 @@ class DiffSVS_System(CFM):
         if phn.shape[1] > max_len:
             phn = phn[:, :max_len]
         elif phn.shape[1] < max_len:
-            phn = F.pad(phn, (0, max_len - phn.shape[1]))
-        
+            phn = F.pad(phn, (0, max_len - phn.shape[1]), value=int(PHN_PAD_ID))
+
         if midi.shape[1] > max_len:
             midi = midi[:, :max_len]
         elif midi.shape[1] < max_len:
-            midi = F.pad(midi, (0, max_len - midi.shape[1]))
+            midi = F.pad(midi, (0, max_len - midi.shape[1]), value=int(PITCH_PAD_ID))
 
         cond = {
             "c_concat": {

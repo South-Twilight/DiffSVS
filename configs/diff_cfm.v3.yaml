@@ -25,6 +25,16 @@ model:
       f0_uv: 1.0      # F0/voiced-unvoiced 损失权重
       dur: 1.0        # 时长预测损失权重
 
+    # ---------- 推理采样配置（infer.py 透传到 CFMSampler.sample_cfg） ----------
+    sampling_config:
+      sampler_type: sde        # 可选: ode / sde (当前修改为 sde 使用 GRPO 分布)
+      sigma: 0.4             # 当 schedule 为 grpo 时，该参数充当超参数 a (一般=0.7)
+      sigma_schedule: flow_grpo     # constant / linear_decay / cosine_decay / flow_grpo
+      sigma_min: 0.0
+      score_denom_eps: 1.0e-5  # 保留兼容；三明治 SDE 中段不再使用 clamp
+      noise_start_t: 0.05      # t < 此值：Phase1 纯 ODE（避开 t→0 的 σ 奇点）
+      noise_stop_t: 0.95       # t >= 此值：Phase3 纯 ODE（避开 t→1 的 score 奇点）
+
     # ---------- 学习率调度：5k warmup + 10w 步线性衰减到 0.1 峰值 ----------
     scheduler_config:
       target: ldm.lr_scheduler.LambdaLinearScheduler
@@ -118,9 +128,9 @@ data:
   target: main.LatentDataModuleFromConfig
   params:
     batch_size: 64                 
-    max_tokens: 6000                 # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
+    max_tokens: 6000                # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
     max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
-    num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
+    num_workers: 8                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
     
     data_dir: "data/final"           # 你的数据集路径
     latent_channels: 128

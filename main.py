@@ -473,7 +473,18 @@ class ImageLogger(Callback):
                 pl_module.eval()
 
             with torch.no_grad():# 这里会调用ddpm中的log_images
-                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)# images is a dict
+                # Lazy initialization of sampling_cfg since pl_module.model.params may not be accessible in __init__
+                if getattr(self, "sampling_cfg", None) is None:
+                    try:
+                        self.sampling_cfg = pl_module.sampling_cfg if hasattr(pl_module, "sampling_cfg") else {}
+                    except Exception:
+                        self.sampling_cfg = {}
+                
+                # Merge self.sampling_cfg into kwargs so that sample() / sample_cfg() can pick it up
+                log_kwargs = self.log_images_kwargs.copy()
+                log_kwargs.update(self.sampling_cfg)
+                
+                images = pl_module.log_images(batch, split=split, **log_kwargs)# images is a dict
 
             for k in images.keys():
                 if k =='f0' or k=='f0_gt':
@@ -521,6 +532,8 @@ class AudioLogger(ImageLogger):
         logging.info('We will not save audio for conditioning and conditioning_rec')
         if self.for_specs:
             self.vocoder = instantiate_from_config(vocoder_cfg)
+
+        self.sampling_cfg = None
 
     def _visualize_attention(self, attention, scale_by_prior=True):
         if scale_by_prior:

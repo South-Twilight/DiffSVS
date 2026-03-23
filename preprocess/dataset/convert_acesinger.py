@@ -107,12 +107,12 @@ def generate_acesinger_labels_flat(opencpop_json_root, acesinger_wav_root, outpu
 # ==========================================
 if __name__ == "__main__":
     # Opencpop 完美 JSON 目录
-    OPENCPOP_JSON_DIR = "/data7/tyx/DiffSVS/data/opencpop"
+    OPENCPOP_JSON_DIR = "./data/opencpop"
     
     # AceSinger 扁平化 Wav 目录
     ACESINGER_WAV_ROOT = "/data7/tyx/espnet/egs2/acesinger/svs1/wav_dump"
     
     # 输出目录
-    OUTPUT_DIR = "/data7/tyx/DiffSVS/data/acesinger"
+    OUTPUT_DIR = "./data/acesinger"
 
     generate_acesinger_labels_flat(OPENCPOP_JSON_DIR, ACESINGER_WAV_ROOT, OUTPUT_DIR)

@@ -9,7 +9,7 @@ import random
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import torch.distributed as dist
-from typing import Optional, Iterator, List
+from typing import Dict, Optional, Iterator, List
 
 from ldm.dataset.joinaudiodataset_anylen import *
 
@@ -363,6 +363,9 @@ class DiffSVSTestDataset(DiffSVSDataset):
         super().__init__('test', **dataset_cfg)
 
 
+# 推理用「仅乐谱」Dataset / collate 已迁至 ``ldm.rl.flow_grpo.dataset``（与 infer.py / GRPO 对齐）。
+
+
 class DDPIndexBatchSampler(Sampler):    # 让长度相似的音频的indices合到一个batch中以避免过长的pad
     def __init__(self, indices, batch_size, num_replicas: Optional[int] = None,
                  rank: Optional[int] = None, shuffle: bool = True,
@@ -464,3 +467,21 @@ class DDPIndexBatchSampler(Sampler):    # 让长度相似的音频的indices合�
 
     def __len__(self) -> int:
         return len(self.batches)
+
+
+def __getattr__(name: str):
+    """向后兼容：推理条件 Dataset / collate 已迁至 ``ldm.dataset.diffsvs_infer_dataset``。"""
+    if name == "DiffSVSInferConditionDataset":
+        from ldm.dataset.diffsvs_infer_dataset import DiffSVSInferConditionDataset
+
+        return DiffSVSInferConditionDataset
+    if name == "infer_condition_collate_fn":
+        from ldm.dataset.diffsvs_infer_dataset import infer_condition_collate_fn
+
+        return infer_condition_collate_fn
+    if name == "infer_condition_collate_cond_only":
+        raise AttributeError(
+            "diffsvs_dataset 不再提供 infer_condition_collate_cond_only；"
+            "请改用 ldm.dataset.diffsvs_infer_dataset.infer_condition_collate_fn。"
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

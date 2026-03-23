@@ -218,6 +218,6 @@ if __name__ == '__main__':
 
 """
 CUDA_VISIBLE_DEVICES=1,2,3,4 python -m preprocess.vae_latent_44k \
-    --tsv_path /data7/tyx/DiffSVS/data/preprocess/data.tsv \
+    --tsv_path ./data/preprocess/data.tsv \
     --num_gpus 4
 """

@@ -61,10 +61,10 @@ def process_gtsinger_meta(input_path, output_path, path_prefix):
 # ==========================================
 if __name__ == "__main__":
     # 输入文件 (GTSinger Chinese 的原始 meta.json)
-    INPUT_FILE = "/data7/tyx/DiffSVS/data/gtsinger/meta.json" 
+    INPUT_FILE = "./data/gtsinger/meta.json" 
     
     # 输出文件 (修改后的文件)
-    OUTPUT_FILE = "/data7/tyx/DiffSVS/data/gtsinger/gtsinger.json"
+    OUTPUT_FILE = "./data/gtsinger/gtsinger.json"
     
     # 需要添加的前缀路径
     # 例如：最终路径变成 /data7/tyx/dataset/GTSinger/Chinese/...

@@ -94,10 +94,6 @@ class CFM(LatentDiffusion_audio):
     @torch.no_grad()
     def sample(self, cond, batch_size=16, timesteps=None, shape=None, x_latent=None, t_start=None, **kwargs):
         if shape is None:
-            # if self.channels > 0:
-            #     shape = (batch_size, self.channels, self.mel_dim, self.mel_length)
-            # else:
-            #     shape = (batch_size, self.mel_dim, self.mel_length)
             mel_length = math.ceil(cond['acoustic']['mel2ph'].shape[2] * 1 / 4)
             shape = (self.channels, self.mel_dim, mel_length) if self.channels > 0 else (self.mel_dim, mel_length)
         if cond is not None:
@@ -107,15 +103,23 @@ class CFM(LatentDiffusion_audio):
             else:
                 cond = [c[:batch_size] for c in cond] if isinstance(cond, list) else cond[:batch_size]
 
-        neural_ode = NeuralODE(self.ode_wrapper(cond), solver='euler', sensitivity="adjoint", atol=1e-4, rtol=1e-4)
-        t_span = torch.linspace(0, 1, 25 if timesteps is None else timesteps)
-        if t_start is not None:
-            t_span = t_span[t_start:]
-
-        x0 = torch.randn(shape, device=self.device) if x_latent is None else x_latent
-        eval_points, traj = neural_ode(x0, t_span)
-
-        return traj[-1], traj
+        from ldm.models.diffusion.cfm1_audio_sampler import CFMSampler
+        sampler = CFMSampler(self, num_timesteps=self.num_timesteps)
+        x_final, traj = sampler._sample_loop(
+            wrapper=self.ode_wrapper(cond),
+            shape=shape,
+            timesteps=timesteps,
+            x_latent=x_latent,
+            t_start=t_start,
+            sampler_type=kwargs.get("sampler_type", "ode"),
+            sigma=kwargs.get("sigma", 0.0),
+            sigma_schedule=kwargs.get("sigma_schedule", "constant"),
+            sigma_min=kwargs.get("sigma_min", 0.0),
+            noise_start_t=kwargs.get("noise_start_t", 0.05),
+            noise_stop_t=kwargs.get("noise_stop_t", 0.95),
+            score_denom_eps=kwargs.get("score_denom_eps", 1e-4),
+        )
+        return x_final, traj
 
     def ode_wrapper(self, cond):
         # self.estimator receives x, mask, mu, t, spk as arguments
@@ -133,16 +137,23 @@ class CFM(LatentDiffusion_audio):
             else:
                 cond = [c[:batch_size] for c in cond] if isinstance(cond, list) else cond[:batch_size]
 
-        neural_ode = NeuralODE(self.ode_wrapper_cfg(cond, unconditional_guidance_scale, unconditional_conditioning), solver='euler', sensitivity="adjoint", atol=1e-4, rtol=1e-4)
-        t_span = torch.linspace(0, 1, 25 if timesteps is None else timesteps)
-
-        if t_start is not None:
-            t_span = t_span[t_start:]
-
-        x0 = torch.randn(shape, device=self.device) if x_latent is None else x_latent
-        eval_points, traj = neural_ode(x0, t_span)
-
-        return traj[-1], traj
+        from ldm.models.diffusion.cfm1_audio_sampler import CFMSampler
+        sampler = CFMSampler(self, num_timesteps=self.num_timesteps)
+        x_final, traj = sampler._sample_loop(
+            wrapper=self.ode_wrapper_cfg(cond, unconditional_guidance_scale, unconditional_conditioning),
+            shape=shape,
+            timesteps=timesteps,
+            x_latent=x_latent,
+            t_start=t_start,
+            sampler_type=kwargs.get("sampler_type", "ode"),
+            sigma=kwargs.get("sigma", 0.0),
+            sigma_schedule=kwargs.get("sigma_schedule", "constant"),
+            sigma_min=kwargs.get("sigma_min", 0.0),
+            noise_start_t=kwargs.get("noise_start_t", 0.05),
+            noise_stop_t=kwargs.get("noise_stop_t", 0.95),
+            score_denom_eps=kwargs.get("score_denom_eps", 1e-4),
+        )
+        return x_final, traj
 
     def ode_wrapper_cfg(self, cond, unconditional_guidance_scale, unconditional_conditioning):
         # self.estimator receives x, mask, mu, t, spk as arguments

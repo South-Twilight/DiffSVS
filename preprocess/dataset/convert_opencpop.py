@@ -273,7 +273,7 @@ if __name__ == "__main__":
     INPUT_TXT = "/data7/tyx/dataset/opencpop/segments/transcriptions.txt"
     
     # Output Directory
-    OUTPUT_DIR = "/data7/tyx/DiffSVS/data/opencpop"
+    OUTPUT_DIR = "./data/opencpop"
     
     # Wav Root (For hardcoded path generation)
     WAV_ROOT = "/data7/tyx/dataset/opencpop/segments/wavs"

@@ -258,6 +258,6 @@ if __name__ == "__main__":
     INPUT_META = "/data7/tyx/dataset/m4singer/meta.json" 
     
     # 输出：转换后的 JSON 文件夹
-    OUTPUT_DIR = "/data7/tyx/DiffSVS/data/m4singer"
+    OUTPUT_DIR = "./data/m4singer"
     
     process_m4singer_meta(INPUT_META, OUTPUT_DIR)

@@ -1,6 +1,6 @@
 import json
 
-json_path = "/data7/tyx/DiffSVS/data/metadata.json"
+json_path = "./data/metadata.json"
 json_file = json.load(open(json_path, 'r', encoding='utf-8'))
 
 cnt = 0

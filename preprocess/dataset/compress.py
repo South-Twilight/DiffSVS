@@ -30,7 +30,7 @@ def minify_json(input_path, output_path):
     print(f"Saved:    {old_size - new_size:.2f} MB")
 
 if __name__ == "__main__":
-    INPUT_FILE = "/data7/tyx/DiffSVS/data/meta.json"
-    OUTPUT_FILE = "/data7/tyx/DiffSVS/data/meta_min.json"
+    INPUT_FILE = "./data/meta.json"
+    OUTPUT_FILE = "./data/meta_min.json"
     
     minify_json(INPUT_FILE, OUTPUT_FILE)
