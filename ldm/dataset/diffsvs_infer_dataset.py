@@ -4,6 +4,7 @@ import ast
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -60,6 +61,8 @@ class DiffSVSInferConditionDataset(Dataset):
         max_duration: float = 20.0,
         data_dir: Optional[str] = None,
         use_singer_map: bool = False,
+        load_prompt_latent: bool = True,
+        max_prompt_len: int = 100,
     ) -> None:
         super().__init__()
         self.manifest_path = manifest_path
@@ -83,6 +86,8 @@ class DiffSVSInferConditionDataset(Dataset):
         self.use_singer_map = bool(use_singer_map)
 
         self.ph2id = {p: i for i, p in enumerate(phn_set)}
+        self.load_prompt_latent = bool(load_prompt_latent)
+        self.max_prompt_len = int(max_prompt_len)
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -120,7 +125,7 @@ class DiffSVSInferConditionDataset(Dataset):
         if f0_path and not os.path.isfile(f0_path):
             f0_path = ""
 
-        prompt_latent_path = None
+        prompt_latent_path: Optional[str] = None
         cand_list = _safe_literal_list(
             row.get("prompt_latent_paths", row.get("prompt_mel_paths", "[]"))
         )
@@ -129,6 +134,17 @@ class DiffSVSInferConditionDataset(Dataset):
             if rp and os.path.isfile(rp):
                 prompt_latent_path = rp
                 break
+
+        prompt_latent = None
+        if self.load_prompt_latent and prompt_latent_path:
+            # prompt latent: [C, T_p] (torch model expects [B, C, T_p] after collate)
+            prompt_np = np.load(prompt_latent_path).astype(np.float32)  # [C, T_p]
+            prompt_t = torch.from_numpy(prompt_np)  # [C, T_p]
+            if prompt_t.dim() != 2:
+                raise ValueError(f"prompt latent must be rank-2 [C, T], got shape={tuple(prompt_t.shape)}")
+            if self.max_prompt_len > 0 and prompt_t.shape[1] > self.max_prompt_len:
+                prompt_t = prompt_t[:, : self.max_prompt_len]
+            prompt_latent = prompt_t
 
         return {
             "phn": torch.tensor(phn_ids, dtype=torch.long),
@@ -142,6 +158,7 @@ class DiffSVSInferConditionDataset(Dataset):
             "latent_path": latent_path if latent_path is not None else "",
             "f0_path": f0_path,
             "prompt_latent_path": prompt_latent_path if prompt_latent_path is not None else "",
+            "prompt_latent": prompt_latent,
         }
 
 
@@ -170,6 +187,39 @@ def infer_condition_collate_fn(
     )
     spk_id = torch.stack([x["spk_id"] for x in batch], dim=0).long()
 
+    # Prompt latent: [B, C, T_p] (pad in collate so backbone sees a uniform tensor)
+    prompt_latents: List[torch.Tensor] = []
+    for x in batch:
+        p = x.get("prompt_latent", None)
+        if isinstance(p, torch.Tensor):
+            prompt_latents.append(p)
+        else:
+            prompt_latents.append(None)
+
+    cond_prompt = None
+    if any(p is not None for p in prompt_latents):
+        # Determine pad target length
+        lens = [int(p.shape[1]) for p in prompt_latents if p is not None]
+        target_len = max(lens) if len(lens) > 0 else 0
+        # Determine channel dim from first non-empty prompt
+        C = next(p.shape[0] for p in prompt_latents if p is not None)
+
+        def pad_prompt_edge(p: torch.Tensor, tlen: int) -> torch.Tensor:
+            if p.shape[1] == tlen:
+                return p
+            if p.shape[1] == 0:
+                return torch.zeros((p.shape[0], tlen), dtype=p.dtype)
+            last = p[:, -1:].expand(-1, tlen - p.shape[1])
+            return torch.cat([p, last], dim=1)
+
+        padded = []
+        for p in prompt_latents:
+            if p is None:
+                padded.append(torch.zeros((C, target_len), dtype=torch.float32))
+            else:
+                padded.append(pad_prompt_edge(p, target_len))
+        cond_prompt = torch.stack(padded, dim=0)  # [B, C, T_p]
+
     cond: Dict[str, Any] = {
         "phn": phn,
         "pitches": pitches,
@@ -178,6 +228,8 @@ def infer_condition_collate_fn(
         "spk_id": spk_id,
         "infer": True,
     }
+    if cond_prompt is not None:
+        cond["prompt_latent"] = cond_prompt
 
     names = [str(x.get("f_name", "")) for x in batch]
     audio_paths = [str(x.get("audio_path", "")) for x in batch]

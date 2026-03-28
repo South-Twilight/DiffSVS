@@ -128,9 +128,9 @@ data:
   target: main.LatentDataModuleFromConfig
   params:
     batch_size: 64                 
-    max_tokens: 6000                # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
+    max_tokens: 6000                 # 最大 Latent 帧数 (大约相当于同时容纳 1600 秒的极度压缩音频)
     max_sentences: 64                # 单个 Batch 最多包含多少条音频 (防止短音频过多导致张量列表爆炸)
-    num_workers: 8                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
+    num_workers: 16                  # 既然是 A6000 服务器，CPU 肯定也不弱，拉高 DataLoader 线程数
     
     data_dir: "data/final"           # 你的数据集路径
     latent_channels: 128

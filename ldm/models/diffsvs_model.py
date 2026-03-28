@@ -261,7 +261,7 @@ class DiffSVS_Backbone(nn.Module):
         f0_gt = acoustic.get("f0_gt", None)
         # spk_id 仍然保留在数据流中（方便将来扩展），但本 forward 不显式使用
         # y_spk = acoustic["spk_id"]
-        prompt = acoustic.get("prompt", None)
+        prompt = acoustic.get("prompt_latent", None)
 
         B, _, T_lat = x.shape
         device = x.device

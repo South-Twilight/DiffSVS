@@ -208,7 +208,7 @@ class DiffSVS_BackboneMMDiT(nn.Module):
         infer = context.get("infer", not self.training)
         device = x.device
         
-        prompt = acoustic.get("prompt", None)
+        prompt = acoustic.get("prompt_latent", None)
         T_p = prompt.shape[2] if prompt is not None else 0
         B, _, T_lat = x.shape
         T_total = T_p + T_lat

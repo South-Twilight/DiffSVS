@@ -10,5 +10,6 @@ exp_outputs
 thirdparty
 outputs
 wandb
+debug*
 
 *.tar

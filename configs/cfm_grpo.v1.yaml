@@ -1,0 +1,78 @@
+# KL = 0, lr = 1e-3
+# 过拟合
+base_model_config: configs/diff_cfm.v3.yaml
+
+grpo:
+  frontend:
+    # Freeze frontend and use predicted durations for dur_gt
+    duration_min: 1
+
+  rollout:
+    # Rollout Engine (Girsanov-scheduled SDE sample loop)
+    G: ${grpo.grpo_train.groups_per_prompt}
+    timesteps: 25
+    noise_start_t: 0.05
+    noise_stop_t: 0.95
+    sigma: 1.0
+    sigma_schedule: flow_grpo
+    sampler_type: sde
+    score_denom_eps: 1.0e-4
+    # Debug: SDE divergence across G samples (same cond + same initial noise)
+    # debug_sde_diff: false
+    # debug_sde_dir: "debug_outputs/grpo_sde_vis"
+    # debug_sde_max_groups: 4
+
+  trainer:
+    # Trainer Engine hyper-parameters (match Rollout Engine via a_sde)
+    # a_sde 必须与 rollout.sigma 严格对齐
+    a_sde: ${grpo.rollout.sigma}
+    # 与 Rollout 的 score 分母数值稳定项保持一致
+    score_denom_eps: ${grpo.rollout.score_denom_eps}
+    kl_coef: 0
+    clip_range: 0.2
+
+  reward:
+    reward_config_path: configs/reward.yaml
+    enabled_rewards: ["singmos_pro"]
+    reward_weights:
+      singmos_pro: 1.0
+    adv_eps: 1e-8
+    # Debug: keep generated wave in output dict so you can verify
+    # # wave[i] corresponds to reward[i]/advantage[i].
+    # debug_return_wave: false
+    # # Where to dump debug wav files
+    # debug_save_dir: "debug_outputs/grpo_audio"
+
+  grpo_train:
+    # If true: skip optimizer/backward/step, skip wandb, skip checkpoint saving
+    skip_train: false
+    # Resume training from existing run directory (null/empty means create new run dir)
+    resume_run_dir: null
+    # DataLoader batch size for condition inputs（B：每个迭代并行处理多少条条件/样本）
+    data_batch_size: 8
+
+    # 每条条件/样本采样多少条轨迹并组成一个 prompt group（G：滚动/打分的组内样本数）
+    groups_per_prompt: 8
+
+    # 经验回放 buffer 累计多少个 prompt group 后，执行一次策略更新
+    # （这不是 G，也不是 B；而是“更新窗口内”有多少个 prompt group）
+    rl_update_group_batch_size: 64
+    # Total training epochs
+    epochs: 2
+    # Optimizer LR for LoRA params
+    lr: 1e-4
+    # 梯度累积步数（在一个 rl_update_group_batch_size 触发的更新窗口内，累积多少步再 step）
+    grad_accum_steps: 2
+    # If true, flush remaining accumulated gradients at each epoch end
+    flush_accum_on_epoch_end: true
+    # Save LoRA checkpoint every N update steps
+    save_every_steps: 20
+    # Output directory for checkpoints
+    output_dir: "exp_ckpt/grpo_checkpoints"
+    # 每个 DataLoader batch 将各 prompt 的 reward / advantage 写入 <run_dir>/logdir/reward_advantage.log（与 checkpoints 平级；JSON 行）
+    log_reward_advantage: true
+    # 相对 run_dir 的子目录，或绝对路径；空则默认为 logdir
+    logdir: logdir
+    # WandB settings
+    wandb_project: "DiffSVS-GRPO"
+    wandb_run_name: "grpo_test_run"

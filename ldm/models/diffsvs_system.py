@@ -142,11 +142,11 @@ class DiffSVS_System(CFM):
                 xc = batch[key]
                 c = self.get_learned_conditioning(xc)
                 # 如果 batch 中提供了 prompt latent，则一并放入 cond，供 backbone 使用
-                if "prompt" in batch and isinstance(c, dict):
-                    prompt = batch["prompt"]
-                    if bs is not None and isinstance(prompt, torch.Tensor):
-                        prompt = prompt[:bs]
-                    c["prompt"] = prompt
+                if "prompt_latent" in batch and isinstance(c, dict):
+                    prompt_latent = batch["prompt_latent"]
+                    if bs is not None and isinstance(prompt_latent, torch.Tensor):
+                        prompt_latent = prompt_latent[:bs]
+                    c["prompt_latent"] = prompt_latent
                 if bs is not None and isinstance(c, dict):
                     c = {k: v[:bs] if isinstance(v, torch.Tensor) and v.dim() > 0 else v for k, v in c.items()}
                 # 把 cond 里所有 tensor 放到当前 device，否则 frontend/backbone 会在 CPU 上算，显存占用低且可能 device 报错
@@ -180,8 +180,8 @@ class DiffSVS_System(CFM):
         y_spk = cond["spk_id"]
         f0_gt = cond.get("f0_gt", None)
         infer = cond.get("infer", not self.training)
-        # 可选：prompt latent，形状 [B, C, T]
-        prompt_latent = cond.get("prompt", None)
+        # 可选：prompt latent，形状 [B, C, T_p]
+        prompt_latent = cond.get("prompt_latent", None)
         padding_mask = (phn == PHN_PAD_ID)
 
         pred_dur_log = self.frontend(phn, notedurs, midi, notetypes, padding_mask)
@@ -214,7 +214,7 @@ class DiffSVS_System(CFM):
                 "midi": midi,
                 "f0_gt": f0_gt,
                 "spk_id": y_spk,
-                "prompt": prompt_latent,
+                "prompt_latent": prompt_latent,
             },
             "c_crossattn": None,
             "name": None,

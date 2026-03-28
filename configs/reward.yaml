@@ -1,0 +1,17 @@
+- name: mcd_f0
+  f0min: 40
+  f0max: 810
+  mcep_shift: 5
+  mcep_fftl: 1024
+  mcep_dim: 39
+  mcep_alpha: 0.466
+  seq_mismatch_tolerance: 0.1
+  power_threshold: -20
+  dtw: true
+  f0_mode: "rmse"
+
+- name: speaker
+  model_tag: default
+
+- name: pseudo_mos
+  predictor_types: ["singmos_pro"]

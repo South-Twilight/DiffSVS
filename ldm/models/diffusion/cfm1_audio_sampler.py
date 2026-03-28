@@ -1,4 +1,7 @@
 import os
+import logging
+from omegaconf import ListConfig
+
 from pytorch_memlab import LineProfiler,profile
 import torch
 import torch.nn as nn
@@ -9,18 +12,16 @@ from einops import rearrange, repeat
 from contextlib import contextmanager
 from functools import partial
 from tqdm import tqdm
-from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps
 from torchvision.utils import make_grid
 try:
     from pytorch_lightning.utilities.distributed import rank_zero_only
 except:
     from pytorch_lightning.utilities import rank_zero_only # torch2
 from torchdyn.core import NeuralODE
-from ldm.models.diffusion.cfm1_audio import Wrapper, Wrapper_cfg
-from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
-from omegaconf import ListConfig
 
-from ldm.util import log_txt_as_img, exists, default
+from ldm.models.diffusion.cfm1_audio import Wrapper, Wrapper_cfg
+
+logger = logging.getLogger(__name__)
 
 class CFMSampler(object):
 

@@ -133,7 +133,7 @@ def save_audio_pair(logger, save_dir, item_name, pred_wav, gt_wav_path):
 def load_model_and_sampler(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
     model = instantiate_from_config(config.model)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "state_dict" in ckpt:
         model.load_state_dict(ckpt["state_dict"], strict=False)
     else:
@@ -180,6 +180,7 @@ def run_inference(rank, args):
 
     scales = [float(x) for x in args.scales.split("-")] if args.scales else [args.scale]
     csv_rows = []
+    wavscp_rows = []
 
     # 运行级别日志（写到输出根目录）
     run_log_path = os.path.join(args.save_dir, f"infer_rank{rank}.log")
@@ -253,21 +254,26 @@ def run_inference(rank, args):
                 uc_cond["spk_id"] = torch.zeros_like(cond["spk_id"])
                 uc_cond["infer"] = True
 
-                # 若提供了 prompt latent，则加载并在时间维上裁剪到最多 100 帧
-                # 与训练集 DiffSVSDataset 中 max_prompt_len=100 的逻辑对齐：
-                # - 训练时随机裁一段长度为 100
-                # - 推理时简单使用前 100 帧作为 prompt 参考
-                if prompt_latent_path is not None:
+                # dataset/collate 已经可能提供 cond["prompt_latent"]（含 padding）
+                # 只有在 cond 未提供 prompt_latent 时才 fallback 从 prompt_latent_path 读取。
+                if cond.get("prompt_latent", None) is None and prompt_latent_path is not None:
+                    # 若提供了 prompt latent，则加载并在时间维上裁剪到最多 100 帧
+                    # 与训练集 DiffSVSDataset 中 max_prompt_len=100 的逻辑对齐：
+                    # - 训练时随机裁一段长度为 100
+                    # - 推理时简单使用前 100 帧作为 prompt 参考
                     prompt_t, prompt_np = maybe_load_prompt_latent(
                         prompt_latent_path, device, max_prompt_len=100
                     )
                     _, _, T_p = prompt_t.shape
                     logger.info(
                         "prompt: prompt_np_shape=%s orig_T_p=%d used_T_p=%d max_prompt_len=%d",
-                        prompt_np.shape, prompt_np.shape[1], prompt_t.shape[2], 100
+                        prompt_np.shape,
+                        prompt_np.shape[1],
+                        prompt_t.shape[2],
+                        100,
                     )
-                    cond["prompt"] = prompt_t
-                    uc_cond["prompt"] = prompt_t
+                    cond["prompt_latent"] = prompt_t
+                    uc_cond["prompt_latent"] = prompt_t
 
                 start_code = torch.randn(args.n_samples, latent_channels, latent_length, device=device)
                 logger.info(
@@ -306,11 +312,17 @@ def run_inference(rank, args):
             for wav_t in wav_preds:
                 pred_path = save_audio_pair(logger, save_dir, item_name, wav_t, gt_wav_path)
                 csv_rows.append({"audio_path": pred_path, "name": item_name, "scale": scale})
+                wavscp_rows.append(f"{item_name} {os.path.abspath(pred_path)}")
                 logger.info("Append csv row: name=%s scale=%s", item_name, scale)
 
     if rank == 0:
         csv_path = os.path.join(args.save_dir, "inference_results.csv")
         pd.DataFrame(csv_rows).to_csv(csv_path, index=False)
+        wavscp_path = os.path.join(args.save_dir, "wav.scp")
+        with open(wavscp_path, "w", encoding="utf-8") as f:
+            for line in wavscp_rows:
+                f.write(line + "\n")
+        print(f"推理完成，wavscp: {wavscp_path}")
         print(f"推理完成，结果清单: {csv_path}")
 
 
