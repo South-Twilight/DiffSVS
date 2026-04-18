@@ -1,5 +1,4 @@
-# KL = 0, lr = 1e-3
-# 过拟合
+# sigma = 0.1
 base_model_config: configs/diff_cfm.v3.yaml
 
 grpo:
@@ -13,7 +12,7 @@ grpo:
     timesteps: 25
     noise_start_t: 0.05
     noise_stop_t: 0.95
-    sigma: 1.0
+    sigma: 0.1
     sigma_schedule: flow_grpo
     sampler_type: sde
     score_denom_eps: 1.0e-4
@@ -28,7 +27,7 @@ grpo:
     a_sde: ${grpo.rollout.sigma}
     # 与 Rollout 的 score 分母数值稳定项保持一致
     score_denom_eps: ${grpo.rollout.score_denom_eps}
-    kl_coef: 0
+    kl_coef: 0.01
     clip_range: 0.2
 
   reward:
@@ -70,7 +69,7 @@ grpo:
     # Output directory for checkpoints
     output_dir: "exp_ckpt/grpo_checkpoints"
     # 每个 DataLoader batch 将各 prompt 的 reward / advantage 写入 <run_dir>/logdir/reward_advantage.log（与 checkpoints 平级；JSON 行）
-    log_reward_advantage: true
+    log_reward_advantage: false
     # 相对 run_dir 的子目录，或绝对路径；空则默认为 logdir
     logdir: logdir
     # WandB settings

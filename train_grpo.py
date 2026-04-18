@@ -646,14 +646,13 @@ class RewardEngine:
         # === 4) Advantage（GRPO）===
         mean = total_reward.mean()
         std = total_reward.std(unbiased=False)
-        safe_std = torch.clamp(std, min=0.02)
-        advantage = (total_reward - mean) / safe_std
+        advantage = (total_reward - mean) / (std + 1e-4)
 
-        # 记录归一化后的子 reward（便于日志直接分析）
-        components["singmos_pro"] = mos_reward
-        components["spk_similarity"] = sim_reward
-        components["mcd"] = mcd_reward
-        components["f0"] = f0_reward
+        # 记录原始子 reward（未做归一化/映射）
+        components["singmos_pro"] = raw_mos
+        components["spk_similarity"] = raw_sim
+        components["mcd"] = raw_mcd
+        components["f0"] = raw_f0
 
         prompt_group_data["reward"] = total_reward
         prompt_group_data["advantage"] = advantage

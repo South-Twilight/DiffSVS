@@ -1,6 +1,6 @@
 """
 DiffSVS 推理脚本：加载 config/ckpt，读 manifest 乐谱，CFM 采样得到 latent，
-除以 scale_factor 后直接送 VAE 解码为波形并保存。结果保存到 outputs/{model}/epoch={epoch}/。
+除以 scale_factor 后直接送 VAE 解码为波形并保存。默认保存到 exp_outputs/{test_set 来自 manifest 文件名}/{model}/epoch={epoch}/。
 """
 import os
 import argparse
@@ -328,7 +328,8 @@ def run_inference(rank, args):
 
 if __name__ == "__main__":
     args = parse_args()
-    # 默认保存路径：exp_outputs/{model}/epoch={epoch}，便于区分不同 ckpt
+    _manifest_stem = Path(args.manifest_path).stem  # 如 data/final/test_300.tsv -> test_300
+    # 默认保存路径：exp_outputs/{test_set}/{model}/epoch={epoch}，便于区分不同 ckpt与 test set
     if not args.save_dir:
         ckpt_path = Path(args.ckpt)
         # 1) 模型目录：优先从 checkpoints 上一级目录获取 run 名
@@ -344,10 +345,12 @@ if __name__ == "__main__":
 
         # 2) ckpt 标识：仅使用 epoch/step，采样步数下沉到 scale 目录名中
         epoch_part = ckpt_path.stem  # 例如 epoch=000064 或 epoch=000049-step=000040000
-        args.save_dir = os.path.join("exp_outputs", model_part, epoch_part)
+        args.save_dir = os.path.join("exp_outputs", _manifest_stem, model_part, epoch_part)
     else:
         args.save_dir = args.save_dir.rstrip("/")
-    
+        if Path(args.save_dir).name != _manifest_stem:
+            args.save_dir = os.path.join(args.save_dir, _manifest_stem)
+
     make_dirs(args.save_dir)
 
     if args.num_gpus > 1:

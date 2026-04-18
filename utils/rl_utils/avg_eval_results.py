@@ -61,8 +61,9 @@ def main():
         n, means = _mean_metrics(rows)
         print(f"[{tag}] utterances={n}")
         for k in sorted(means.keys()):
-            print(f"  {k}: {means[k]:.6f}")
-        summary[tag] = {"utterances": int(n), "means": means}
+            print(f"  {k}: {means[k]:.3f}")
+        means_rounded = {k: round(v, 3) for k, v in means.items()}
+        summary[tag] = {"utterances": int(n), "means": means_rounded}
 
     out_path = os.path.join(eval_dir, args.out_json)
     with open(out_path, "w", encoding="utf-8") as f:

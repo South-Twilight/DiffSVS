@@ -1,4 +1,4 @@
-# KL = 0.1, sigma = 1.0
+# KL = 0.01, sigma = 1.0
 # target: 正常训练，初始不同noise，SDE更大的随机性, KL约束更强
 base_model_config: configs/diff_cfm.v3.yaml
 
